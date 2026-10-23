@@ -534,6 +534,64 @@ describe('post_github_review', () => {
     }
   })
 
+  test('재리뷰 회차 종료가 지연돼도 게시된 승인 유지 결과의 체크를 완료한다', async () => {
+    const head = 'd'.repeat(40)
+    configureReviewVerdictCoordinator({
+      resolveEffectiveApproval: async () => ({ ok: true, effective: 'APPROVED' }),
+      resolveHeadSha: async () => head,
+    })
+    const finished = Promise.withResolvers<ReviewCheckOutcome>()
+    const completingRound = Promise.withResolvers<void>()
+    const completedRound = Promise.withResolvers<void>()
+    const publisher = {
+      start: async () => ({ mode: 'status' as const }),
+      finish: async (_key: unknown, _ref: unknown, outcome: ReviewCheckOutcome) => {
+        finished.resolve(outcome)
+        return 'published' as const
+      },
+    }
+    await githubReviewChecks.attach({
+      publisher,
+      store: { load: async () => [], save: async () => {} },
+      logger: { info: () => {}, warn: () => {} },
+    })
+    await githubReviewChecks.beginReview({ repo: 'acme/widgets', pullRequest: 7, headSha: head }, 'bg_delayed_round')
+    await githubReviewChecks.reviewerSettled('bg_delayed_round', { kind: 'ok' })
+    const channelRouter = router()
+    channelRouter.registerOutbound('github', async () => ({ ok: true }))
+    const tool = createPostGithubReviewTool({
+      router: {
+        ...channelRouter,
+        completeGithubReviewRound: async () => {
+          completingRound.resolve()
+          await completedRound.promise
+          return { kind: 'completed' }
+        },
+      },
+      origin: {
+        ...githubOrigin,
+        githubReviewRound: {
+          kind: 'push',
+          roundId: 'delayed-round',
+          workspace: githubOrigin.workspace,
+          prNumber: 7,
+          headSha: head,
+          carrierThread: null,
+        },
+      },
+      sessionId,
+    })
+    const result = run(tool, { event: 'APPROVE', body: '기존 승인을 유지합니다.', head_sha: head })
+    try {
+      await completingRound.promise
+      expect(await finished.promise).toEqual({ kind: 'verdict', state: 'APPROVED' })
+    } finally {
+      completedRound.resolve()
+      githubReviewChecks.detach(publisher)
+    }
+    expect((await result).details).toMatchObject({ ok: true, fallback: 'comment' })
+  })
+
   test.each([
     ['APPROVE', 'APPROVED'],
     ['REQUEST_CHANGES', 'CHANGES_REQUESTED'],

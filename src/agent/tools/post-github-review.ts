@@ -219,6 +219,12 @@ async function postDuplicateReviewComment(args: {
     ...coverage,
   })
   const state = args.verdict === 'APPROVE' ? 'APPROVED' : 'CHANGES_REQUESTED'
+  void (args.reviewedHeadSha !== undefined
+    ? githubReviewChecks.reviewPosted(
+        { repo: args.origin.workspace, pullRequest: args.prNumber, headSha: args.reviewedHeadSha },
+        state,
+      )
+    : githubReviewChecks.completePostingReviews(args.origin.workspace, args.prNumber, state))
   if (args.origin.githubReviewRound !== undefined) {
     try {
       await args.router.completeGithubReviewRound?.({
@@ -232,12 +238,6 @@ async function postDuplicateReviewComment(args: {
       args.logger.warn(formatChannelToolFailure('post_github_review', String(error)))
     }
   }
-  void (args.reviewedHeadSha !== undefined
-    ? githubReviewChecks.reviewPosted(
-        { repo: args.origin.workspace, pullRequest: args.prNumber, headSha: args.reviewedHeadSha },
-        state,
-      )
-    : githubReviewChecks.completePostingReviews(args.origin.workspace, args.prNumber, state))
 
   const details: PostGithubReviewDetails = {
     ok: true,

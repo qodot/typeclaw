@@ -42,7 +42,7 @@ export function createPostGithubReviewTool(options: {
     name: 'post_github_review',
     label: 'Post GitHub PR Review',
     description:
-      'GitHub channel sessions only. Submit a formal PR review. The adapter resolves the head SHA, validates diff anchors, moves out-of-diff findings into the body, enforces approval policy, and verifies the posted review.',
+      'GitHub channel sessions only. Post a PR review. The adapter resolves the head SHA, validates diff anchors, moves out-of-diff findings into the body, enforces approval policy, and verifies the posted review. If the same verdict already stands, post the new result as a PR comment and complete the re-review.',
     parameters: Type.Object({
       event: Type.Union([Type.Literal('APPROVE'), Type.Literal('REQUEST_CHANGES'), Type.Literal('COMMENT')]),
       body: Type.String({ minLength: 1 }),
@@ -82,21 +82,18 @@ export function createPostGithubReviewTool(options: {
           ...(origin.githubReviewRound !== undefined ? { round: origin.githubReviewRound } : {}),
           thread: origin.thread,
           ...(params.head_sha !== undefined ? { reviewedHeadSha: params.head_sha } : {}),
-          retainDuplicateLease: params.event === 'REQUEST_CHANGES',
+          retainDuplicateLease: true,
         })
         if (blocked !== null) {
-          if (
-            params.event === 'REQUEST_CHANGES' &&
-            blocked.kind === 'duplicate' &&
-            blocked.duplicateSource === 'standing'
-          ) {
+          if (blocked.kind === 'duplicate' && blocked.duplicateSource === 'standing') {
             let fallbackLanded = false
             try {
-              const fallback = await postDuplicateRequestChangesComment({
+              const fallback = await postDuplicateReviewComment({
                 router,
                 origin,
                 sessionId,
                 prNumber,
+                verdict,
                 body: params.body,
                 comments: (params.comments ?? []).map(toReviewFinding),
                 logger,
@@ -185,11 +182,12 @@ export function createPostGithubReviewTool(options: {
   })
 }
 
-async function postDuplicateRequestChangesComment(args: {
+async function postDuplicateReviewComment(args: {
   router: ChannelRouter
   origin: ChannelReplyOrigin
   sessionId: string
   prNumber: number
+  verdict: 'APPROVE' | 'REQUEST_CHANGES'
   body: string
   comments: readonly ReviewFinding[]
   logger: ChannelToolLogger
@@ -220,14 +218,26 @@ async function postDuplicateRequestChangesComment(args: {
     state: 'COMMENT',
     ...coverage,
   })
-  // The comment republishes a verdict GitHub already holds as a standing
-  // CHANGES_REQUESTED, so the review check completes with that verdict.
+  const state = args.verdict === 'APPROVE' ? 'APPROVED' : 'CHANGES_REQUESTED'
+  if (args.origin.githubReviewRound !== undefined) {
+    try {
+      await args.router.completeGithubReviewRound?.({
+        workspace: args.origin.workspace,
+        prNumber: args.prNumber,
+        sessionId: args.sessionId,
+        verdict: args.verdict,
+        ...(args.reviewedHeadSha !== undefined ? { commitSha: args.reviewedHeadSha } : {}),
+      })
+    } catch (error) {
+      args.logger.warn(formatChannelToolFailure('post_github_review', String(error)))
+    }
+  }
   void (args.reviewedHeadSha !== undefined
     ? githubReviewChecks.reviewPosted(
         { repo: args.origin.workspace, pullRequest: args.prNumber, headSha: args.reviewedHeadSha },
-        'CHANGES_REQUESTED',
+        state,
       )
-    : githubReviewChecks.completePostingReviews(args.origin.workspace, args.prNumber, 'CHANGES_REQUESTED'))
+    : githubReviewChecks.completePostingReviews(args.origin.workspace, args.prNumber, state))
 
   const details: PostGithubReviewDetails = {
     ok: true,
@@ -241,9 +251,7 @@ async function postDuplicateRequestChangesComment(args: {
       content: [
         {
           type: 'text' as const,
-          text: fenceToolResult(
-            'GitHub PR comment posted because the existing CHANGES_REQUESTED review is still active.',
-          ),
+          text: fenceToolResult(`GitHub PR comment posted because the existing ${state} review is still active.`),
         },
       ],
       details,

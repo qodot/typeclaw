@@ -174,6 +174,8 @@ With `review.check` on (the default), each review shows up as a check on the com
 | Agent failure (reviewer error or timeout, review never posted, restart)     | `failure`              | `failure`                  |
 | Cancelled (review request removed, PR converted to draft, review cancelled) | `neutral`              | `success` ("Not reviewed") |
 
+When a re-review keeps the bot's existing `APPROVED` or `CHANGES_REQUESTED` verdict, `post_github_review` posts the new findings as a PR comment instead of duplicating the formal review. After that comment is delivered, the check completes with the existing verdict and any active follow-up round closes. A failed comment delivery leaves the check pending and can be retried.
+
 A red check therefore means either requested changes or a review that did not happen; the check's description says which. Requesting the review again replaces it. A repository can make the check required in branch protection to gate merges on the bot's review; require it by the agent's name.
 
 With a GitHub App, the check page also shows what the review is doing. While the reviewer works, it lists plain-language steps (reading the pull request, reading the code, running commands, writing up findings) with elapsed time and last activity, refreshed about once a minute. Once the review posts, the page summarizes the verdict, review duration, and a table of findings linking to their lines, and its **Details** link opens the review. Failures and skips state the reason and how to retry. The page never shows task or session ids, file paths the reviewer opened, commands, or model text. A PAT's commit status keeps its one-line description, now linked to the posted review.

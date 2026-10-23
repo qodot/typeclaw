@@ -202,9 +202,10 @@ describe('post_github_review', () => {
 
   test('shares effective-state and in-flight coordination with the github-cli-auth guard', async () => {
     let effective: 'NONE' | 'APPROVED' = 'APPROVED'
+    let head = 'sha-1'
     configureReviewVerdictCoordinator({
       resolveEffectiveApproval: async () => ({ ok: true, effective }),
-      resolveHeadSha: async () => 'sha-1',
+      resolveHeadSha: async () => head,
     })
     const channelRouter = router()
     let submissions = 0
@@ -216,14 +217,16 @@ describe('post_github_review', () => {
       return { ok: true, reviewId: 47, state: 'APPROVED' }
     })
 
+    channelRouter.registerOutbound('github', async () => ({ ok: true }))
     const effectiveDuplicate = await run(
       createPostGithubReviewTool({ router: channelRouter, origin: githubOrigin, sessionId }),
       { event: 'APPROVE', body: 'summary' },
     )
-    expect(effectiveDuplicate.details).toMatchObject({ ok: false })
+    expect(effectiveDuplicate.details).toMatchObject({ ok: true, fallback: 'comment' })
     expect(submissions).toBe(0)
 
     effective = 'NONE'
+    head = 'sha-2'
     const first = run(createPostGithubReviewTool({ router: channelRouter, origin: githubOrigin, sessionId }), {
       event: 'APPROVE',
       body: 'summary',
@@ -407,9 +410,12 @@ describe('post_github_review', () => {
     )
   })
 
-  test('serializes duplicate REQUEST_CHANGES fallbacks until outbound delivery completes', async () => {
+  test.each([
+    ['APPROVE', 'APPROVED'],
+    ['REQUEST_CHANGES', 'CHANGES_REQUESTED'],
+  ] as const)('기존 %s 유지 댓글의 동시 게시를 막는다', async (event, state) => {
     configureReviewVerdictCoordinator({
-      resolveEffectiveApproval: async () => ({ ok: true, effective: 'CHANGES_REQUESTED' }),
+      resolveEffectiveApproval: async () => ({ ok: true, effective: state }),
       resolveHeadSha: async () => 'sha-1',
     })
     const channelRouter = router()
@@ -423,13 +429,13 @@ describe('post_github_review', () => {
     })
 
     const first = run(createPostGithubReviewTool({ router: channelRouter, origin: githubOrigin, sessionId }), {
-      event: 'REQUEST_CHANGES',
+      event,
       body: 'first',
     })
     await Bun.sleep(0)
     const second = await run(
       createPostGithubReviewTool({ router: channelRouter, origin: githubOrigin, sessionId: 'concurrent-session' }),
-      { event: 'REQUEST_CHANGES', body: 'second' },
+      { event, body: 'second' },
     )
 
     expect(second.details).toMatchObject({ ok: false })
@@ -438,18 +444,14 @@ describe('post_github_review', () => {
     expect((await first).details).toMatchObject({ ok: true, fallback: 'comment' })
   })
 
-  // Regression: two sibling thread sessions of one PR each finished a
-  // re-review minutes apart, each hit the same standing CHANGES_REQUESTED block, and
-  // each published its own copy of the review as a top-level PR comment.
-  function standingChangesRequested(headSha: () => string) {
+  test.each([
+    ['APPROVE', 'APPROVED'],
+    ['REQUEST_CHANGES', 'CHANGES_REQUESTED'],
+  ] as const)('같은 커밋의 %s 유지 댓글은 한 번만 게시한다', async (event, state) => {
     configureReviewVerdictCoordinator({
-      resolveEffectiveApproval: async () => ({ ok: true, effective: 'CHANGES_REQUESTED' }),
-      resolveHeadSha: async () => headSha(),
+      resolveEffectiveApproval: async () => ({ ok: true, effective: state }),
+      resolveHeadSha: async () => 'sha-1',
     })
-  }
-
-  test('publishes the duplicate-review comment once across sequential sibling sessions', async () => {
-    standingChangesRequested(() => 'sha-1')
     const channelRouter = router()
     const comments: OutboundMessage[] = []
     channelRouter.registerOutbound('github', async (message) => {
@@ -458,12 +460,12 @@ describe('post_github_review', () => {
     })
 
     const first = await run(createPostGithubReviewTool({ router: channelRouter, origin: githubOrigin, sessionId }), {
-      event: 'REQUEST_CHANGES',
+      event,
       body: 'first sibling',
     })
     const second = await run(
       createPostGithubReviewTool({ router: channelRouter, origin: githubOrigin, sessionId: 'concurrent-session' }),
-      { event: 'REQUEST_CHANGES', body: 'second sibling' },
+      { event, body: 'second sibling' },
     )
 
     expect(first.details).toMatchObject({ ok: true, fallback: 'comment' })
@@ -471,18 +473,24 @@ describe('post_github_review', () => {
     expect(comments).toHaveLength(1)
   })
 
-  test('completes a tracked re-review check when its verdict lands as the duplicate-review comment', async () => {
-    // given: a re-review of the head that already holds a standing CHANGES_REQUESTED, tracked as a check
+  test.each([
+    ['APPROVE', 'APPROVED', true],
+    ['APPROVE', 'APPROVED', false],
+    ['REQUEST_CHANGES', 'CHANGES_REQUESTED', true],
+    ['REQUEST_CHANGES', 'CHANGES_REQUESTED', false],
+  ] as const)('기존 %s 유지 댓글 게시 후 %s 체크를 완료한다, SHA 지정: %s', async (event, state, withHead) => {
     const head = 'c'.repeat(40)
-    standingChangesRequested(() => head)
-    let resolveFinished: (outcome: ReviewCheckOutcome) => void = () => {}
-    const finished = new Promise<ReviewCheckOutcome>((resolve) => {
-      resolveFinished = resolve
+    configureReviewVerdictCoordinator({
+      resolveEffectiveApproval: async () => ({ ok: true, effective: state }),
+      resolveHeadSha: async () => head,
     })
+    const outcomes: ReviewCheckOutcome[] = []
+    const finished = Promise.withResolvers<void>()
     const publisher = {
       start: async () => ({ mode: 'status' as const }),
       finish: async (_key: unknown, _ref: unknown, outcome: ReviewCheckOutcome) => {
-        resolveFinished(outcome)
+        outcomes.push(outcome)
+        finished.resolve()
         return 'published' as const
       },
     }
@@ -494,26 +502,46 @@ describe('post_github_review', () => {
     await githubReviewChecks.beginReview({ repo: 'acme/widgets', pullRequest: 7, headSha: head }, 'bg_rereview')
     await githubReviewChecks.reviewerSettled('bg_rereview', { kind: 'ok' })
     const channelRouter = router()
-    channelRouter.registerOutbound('github', async () => ({ ok: true }))
+    const delivering = Promise.withResolvers<void>()
+    const delivered = Promise.withResolvers<void>()
+    let attempt = 0
+    channelRouter.registerOutbound('github', async () => {
+      if (attempt++ === 0) return { ok: false, error: 'GitHub API 502' }
+      delivering.resolve()
+      await delivered.promise
+      return { ok: true }
+    })
+    const params = { event, body: '현재 커밋도 기존 검토 결과를 유지합니다.', ...(withHead ? { head_sha: head } : {}) }
 
     try {
-      // when: the verdict is posted and lands as the duplicate-review comment
-      const result = await run(createPostGithubReviewTool({ router: channelRouter, origin: githubOrigin, sessionId }), {
-        event: 'REQUEST_CHANGES',
-        body: 'still blocked',
-        head_sha: head,
-      })
-
-      // then: the check completes with the standing verdict instead of waiting for the posting deadline
-      expect(result.details).toMatchObject({ ok: true, fallback: 'comment' })
-      expect(await finished).toEqual({ kind: 'verdict', state: 'CHANGES_REQUESTED' })
+      const failed = await run(
+        createPostGithubReviewTool({ router: channelRouter, origin: githubOrigin, sessionId }),
+        params,
+      )
+      expect(failed.details).toMatchObject({ ok: false })
+      expect(outcomes).toEqual([])
+      const retry = run(createPostGithubReviewTool({ router: channelRouter, origin: githubOrigin, sessionId }), params)
+      await delivering.promise
+      expect(outcomes).toEqual([])
+      delivered.resolve()
+      expect((await retry).details).toMatchObject({ ok: true, fallback: 'comment' })
+      await finished.promise
+      expect(outcomes).toEqual([{ kind: 'verdict', state }])
+      expect(hasReview({ sessionId, workspace: githubOrigin.workspace, prNumber: 7, verdict: event })).toBe(false)
     } finally {
+      delivered.resolve()
       githubReviewChecks.detach(publisher)
     }
   })
 
-  test('lets a sibling retry the duplicate-review comment when the first delivery failed', async () => {
-    standingChangesRequested(() => 'sha-1')
+  test.each([
+    ['APPROVE', 'APPROVED'],
+    ['REQUEST_CHANGES', 'CHANGES_REQUESTED'],
+  ] as const)('%s 유지 댓글 게시에 실패하면 다시 시도할 수 있다', async (event, state) => {
+    configureReviewVerdictCoordinator({
+      resolveEffectiveApproval: async () => ({ ok: true, effective: state }),
+      resolveHeadSha: async () => 'sha-1',
+    })
     const channelRouter = router()
     const comments: OutboundMessage[] = []
     channelRouter.registerOutbound('github', async (message) => {
@@ -526,12 +554,12 @@ describe('post_github_review', () => {
     })
 
     const failed = await run(createPostGithubReviewTool({ router: channelRouter, origin: githubOrigin, sessionId }), {
-      event: 'REQUEST_CHANGES',
+      event,
       body: 'first sibling',
     })
     const retry = await run(
       createPostGithubReviewTool({ router: channelRouter, origin: githubOrigin, sessionId: 'concurrent-session' }),
-      { event: 'REQUEST_CHANGES', body: 'second sibling' },
+      { event, body: 'second sibling' },
     )
 
     expect(failed.details).toMatchObject({ ok: false })
@@ -539,9 +567,15 @@ describe('post_github_review', () => {
     expect(comments).toHaveLength(2)
   })
 
-  test('publishes a fresh duplicate-review comment once the PR head advances', async () => {
+  test.each([
+    ['APPROVE', 'APPROVED'],
+    ['REQUEST_CHANGES', 'CHANGES_REQUESTED'],
+  ] as const)('커밋이 바뀌면 %s 유지 댓글을 다시 게시한다', async (event, state) => {
     let head = 'sha-1'
-    standingChangesRequested(() => head)
+    configureReviewVerdictCoordinator({
+      resolveEffectiveApproval: async () => ({ ok: true, effective: state }),
+      resolveHeadSha: async () => head,
+    })
     const channelRouter = router()
     const comments: OutboundMessage[] = []
     channelRouter.registerOutbound('github', async (message) => {
@@ -550,14 +584,20 @@ describe('post_github_review', () => {
     })
     const tool = createPostGithubReviewTool({ router: channelRouter, origin: githubOrigin, sessionId })
 
-    expect((await run(tool, { event: 'REQUEST_CHANGES', body: 'before push' })).details).toMatchObject({ ok: true })
+    expect((await run(tool, { event, body: 'before push' })).details).toMatchObject({ ok: true })
     head = 'sha-2'
-    expect((await run(tool, { event: 'REQUEST_CHANGES', body: 'after push' })).details).toMatchObject({ ok: true })
+    expect((await run(tool, { event, body: 'after push' })).details).toMatchObject({ ok: true })
     expect(comments).toHaveLength(2)
   })
 
-  test('scopes the duplicate-review comment suppression to one pull request', async () => {
-    standingChangesRequested(() => 'sha-1')
+  test.each([
+    ['APPROVE', 'APPROVED'],
+    ['REQUEST_CHANGES', 'CHANGES_REQUESTED'],
+  ] as const)('%s 유지 댓글의 중복 억제는 PR별로 적용한다', async (event, state) => {
+    configureReviewVerdictCoordinator({
+      resolveEffectiveApproval: async () => ({ ok: true, effective: state }),
+      resolveHeadSha: async () => 'sha-1',
+    })
     const channelRouter = router()
     const comments: OutboundMessage[] = []
     channelRouter.registerOutbound('github', async (message) => {
@@ -566,7 +606,7 @@ describe('post_github_review', () => {
     })
 
     const onPr7 = await run(createPostGithubReviewTool({ router: channelRouter, origin: githubOrigin, sessionId }), {
-      event: 'REQUEST_CHANGES',
+      event,
       body: 'pr 7',
     })
     const onPr8 = await run(
@@ -575,7 +615,7 @@ describe('post_github_review', () => {
         origin: { ...githubOrigin, chat: 'pr:8' },
         sessionId: 'concurrent-session',
       }),
-      { event: 'REQUEST_CHANGES', body: 'pr 8' },
+      { event, body: 'pr 8' },
     )
 
     expect(onPr7.details).toMatchObject({ ok: true, fallback: 'comment' })
@@ -583,7 +623,10 @@ describe('post_github_review', () => {
     expect(comments).toHaveLength(2)
   })
 
-  test('keeps a recent-landed REQUEST_CHANGES cooldown duplicate denied without an authoritative standing block', async () => {
+  test.each([
+    ['APPROVE', 'APPROVED'],
+    ['REQUEST_CHANGES', 'CHANGES_REQUESTED'],
+  ] as const)('기존 리뷰 상태가 없는 %s 재시도는 댓글로 대체하지 않는다', async (event, state) => {
     configureReviewVerdictCoordinator({
       resolveEffectiveApproval: async () => ({ ok: true, effective: 'NONE' }),
       resolveHeadSha: async () => 'sha-1',
@@ -592,7 +635,7 @@ describe('post_github_review', () => {
     let submissions = 0
     channelRouter.registerReviewSubmitter('github', async () => {
       submissions += 1
-      return { ok: true, reviewId: 49, state: 'CHANGES_REQUESTED' }
+      return { ok: true, reviewId: 49, state }
     })
     const comments: OutboundMessage[] = []
     channelRouter.registerOutbound('github', async (message) => {
@@ -601,8 +644,8 @@ describe('post_github_review', () => {
     })
     const tool = createPostGithubReviewTool({ router: channelRouter, origin: githubOrigin, sessionId })
 
-    expect((await run(tool, { event: 'REQUEST_CHANGES', body: 'first' })).details).toMatchObject({ ok: true })
-    expect((await run(tool, { event: 'REQUEST_CHANGES', body: 'follow-up' })).details).toMatchObject({ ok: false })
+    expect((await run(tool, { event, body: 'first' })).details).toMatchObject({ ok: true })
+    expect((await run(tool, { event, body: 'follow-up' })).details).toMatchObject({ ok: false })
     expect(submissions).toBe(1)
     expect(comments).toHaveLength(0)
   })
@@ -715,27 +758,30 @@ describe('post_github_review', () => {
     expect(comments[0]?.text).not.toContain('\n## injected.ts')
   })
 
-  test('keeps concurrent REQUEST_CHANGES blocked instead of posting a fallback comment', async () => {
-    const channelRouter = router()
-    const comments: OutboundMessage[] = []
-    channelRouter.registerOutbound('github', async (message) => {
-      comments.push(message)
-      return { ok: true }
-    })
-    const verdictGuard = {
-      guard: async () => ({ block: true as const, kind: 'concurrent' as const, reason: 'already submitting' }),
-      release: async () => {},
-      noteLandedReview: async () => {},
-    }
+  test.each(['APPROVE', 'REQUEST_CHANGES'] as const)(
+    '다른 %s 게시가 진행 중이면 댓글로 대체하지 않는다',
+    async (event) => {
+      const channelRouter = router()
+      const comments: OutboundMessage[] = []
+      channelRouter.registerOutbound('github', async (message) => {
+        comments.push(message)
+        return { ok: true }
+      })
+      const verdictGuard = {
+        guard: async () => ({ block: true as const, kind: 'concurrent' as const, reason: 'already submitting' }),
+        release: async () => {},
+        noteLandedReview: async () => {},
+      }
 
-    const result = await run(
-      createPostGithubReviewTool({ router: channelRouter, origin: githubOrigin, sessionId, verdictGuard }),
-      { event: 'REQUEST_CHANGES', body: 'summary' },
-    )
+      const result = await run(
+        createPostGithubReviewTool({ router: channelRouter, origin: githubOrigin, sessionId, verdictGuard }),
+        { event, body: 'summary' },
+      )
 
-    expect(result.details).toMatchObject({ ok: false, error: 'already submitting' })
-    expect(comments).toEqual([])
-  })
+      expect(result.details).toMatchObject({ ok: false, error: 'already submitting' })
+      expect(comments).toEqual([])
+    },
+  )
 
   test('reports a failed duplicate-review comment fallback', async () => {
     configureReviewVerdictCoordinator({

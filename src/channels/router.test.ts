@@ -19318,6 +19318,90 @@ describe('GitHub review follow-up round composition', () => {
     await router.stop()
   })
 
+  test('기존 승인을 유지하는 댓글을 게시하면 재리뷰 회차를 완료하고 다른 스레드의 마무리를 허용한다', async () => {
+    __resetReviewObserverForTest()
+    __resetReviewVerdictGuardForTest()
+    const dir = await tempDir()
+    const headSha = 'a'.repeat(40)
+    configureReviewVerdictCoordinator({
+      resolveEffectiveApproval: async () => ({ ok: true, effective: 'APPROVED' }),
+      resolveHeadSha: async () => headSha,
+    })
+    const { router } = makeRouter(dir, { nowRef: { value: Date.now() } })
+    const round = {
+      kind: 'push',
+      roundId: 'standing-approval-round',
+      workspace: 'acme/widgets',
+      prNumber: 7,
+      headSha,
+      carrierThread: '101',
+    } as const
+    const firstKey = { adapter: 'github' as const, workspace: 'acme/widgets', chat: 'pr:7', thread: '101' }
+    const secondKey = { ...firstKey, thread: '202' }
+    await router.route(inbound({ ...firstKey, externalMessageId: 'approval-101', githubReviewRound: round }))
+    await router.route(inbound({ ...secondKey, externalMessageId: 'approval-202', githubReviewRound: round }))
+    const submitted: string[] = []
+    const comments: OutboundMessage[] = []
+    const order: string[] = []
+    router.registerReviewSubmitter('github', async ({ event }) => {
+      submitted.push(event)
+      return { ok: true, reviewId: 82, state: 'APPROVED' }
+    })
+    router.registerOutbound('github', async (message) => {
+      comments.push(message)
+      if (message.thread === secondKey.thread) order.push('reply')
+      return { ok: true }
+    })
+    const reviewTool = createPostGithubReviewTool({
+      router,
+      origin: { ...firstKey, githubReviewRound: round },
+      sessionId: 'ses_fake_1',
+    })
+
+    expect(isGithubReviewRoundComplete(round)).toBe(false)
+    const reviewResult = await reviewTool.execute(
+      'approval-review-call',
+      { event: 'APPROVE', body: '현재 변경에서도 기존 승인을 유지한다.', head_sha: headSha },
+      undefined,
+      undefined,
+      {} as Parameters<typeof reviewTool.execute>[4],
+    )
+
+    expect(reviewResult.details).toMatchObject({ ok: true, fallback: 'comment' })
+    expect(submitted).toEqual([])
+    expect(comments).toMatchObject([{ thread: null, text: '현재 변경에서도 기존 승인을 유지한다.' }])
+    expect(isGithubReviewRoundComplete(round)).toBe(true)
+    router.registerReviewStateResolver('github', async () => ({
+      ok: true,
+      selfBlocking: false,
+      selfBlockingReviewId: null,
+      approve: true,
+    }))
+    router.registerReviewThreadResolver('github', async ({ rootCommentId }) => {
+      order.push(`resolve:${rootCommentId}`)
+      return { ok: true }
+    })
+    const replyTool = createChannelReplyTool({
+      router,
+      origin: { ...secondKey, githubReviewRound: round },
+      sessionId: 'ses_fake_2',
+    })
+    const replyResult = await replyTool.execute(
+      'approval-reply-call',
+      { text: '지적한 변경 사항이 반영되어 이 스레드를 해결한다.', resolve_review_thread: true },
+      undefined,
+      undefined,
+      {} as Parameters<typeof replyTool.execute>[4],
+    )
+
+    expect(replyResult.details).toMatchObject({ ok: true })
+    expect(order).toEqual(['resolve:202', 'reply'])
+    expect(router.__testing!.githubReviewRoundFor(secondKey)).toBeNull()
+    __resetReviewObserverForTest()
+    __resetReviewVerdictGuardForTest()
+    await router.stop()
+  })
+
   test('releases a dismissal latch when transient head validation prevents completion', async () => {
     __resetReviewVerdictGuardForTest()
     const dir = await tempDir()

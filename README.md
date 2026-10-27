@@ -26,7 +26,7 @@
 
 ## Channels — one agent, many inboxes
 
-- 📨 **Supported channels** — Slack, Discord, Telegram, Webex, Teams, Instagram, LINE, KakaoTalk, GitHub, and a websocket TUI, driven by the same agent
+- 📨 **Supported channels** — Slack, Discord, Telegram, Webex, Teams, Instagram, LINE, KakaoTalk, GitHub, Sentry, and a websocket TUI, driven by the same agent
 - 🔎 **Cross-channel reading** — beyond the conversation it's in, it can read another channel's history, pull a single message by id, or list a workspace's channels on demand, so "check what's going on in #general" or "what do you make of this message?" just works
 - ✅ **Pull-request review** — treats a GitHub PR as a conversation, reviewing as a participant, with guards against claiming a verdict it didn't actually post and against leaving a PR stranded
 
@@ -127,7 +127,7 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for the recommended local dev loop (`bu
 
 ## Acknowledgments
 
-- **Multi-channel** is powered by [agent-messenger](https://github.com/agent-messenger/agent-messenger) — every non-GitHub adapter (`slack-bot`, `discord-bot`, `telegram-bot`, `webex-bot`, `instagram`, `line`, `kakaotalk`) is built on its SDK. Thanks to the maintainers for the credential extraction, listener protocols, and platform coverage that made multi-channel a feature instead of a year-long project.
+- **Multi-channel** is powered by [agent-messenger](https://github.com/agent-messenger/agent-messenger) — the messaging adapters (`slack-bot`, `discord-bot`, `telegram-bot`, `webex-bot`, `instagram`, `line`, `kakaotalk`) are built on its SDK. Thanks to the maintainers for the credential extraction, listener protocols, and platform coverage that made multi-channel a feature instead of a year-long project.
 - **Subagent architecture** is inspired by [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent) by [@code-yeongyu](https://github.com/code-yeongyu). Thanks for the shape that made this clean.
 - **Question-mark attention escalation** ("Jeff Bezos detection") was suggested by [@kdhfred](https://github.com/kdhfred). Thanks for the idea that turned a wall of `?` into a real signal.
 

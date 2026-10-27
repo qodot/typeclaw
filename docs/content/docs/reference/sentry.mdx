@@ -1,0 +1,134 @@
+---
+title: Sentry
+description: Sentry 이슈 웹훅과 이슈별 에이전트 대화
+---
+
+Sentry 채널은 새 이슈, 재발, 해결 이벤트를 받아 이슈별 에이전트 세션으로 전달합니다. GitHub 채널처럼 앱 인증과 개인 토큰 인증을 선택할 수 있습니다. 앱 인증은 Internal Integration 토큰과 고정 웹훅 URL을 사용하며, 개인 토큰 인증은 터널 주소가 바뀔 때 기존 Custom Integration의 웹훅 URL을 자동 갱신합니다.
+
+## 준비
+
+1. Sentry 조직 설정의 Custom Integrations에서 전용 Internal Integration을 만들고 Issues 웹훅을 선택합니다.
+2. 조직 slug, Integration slug, 수신할 프로젝트 slug를 확인합니다.
+3. 인증 방식을 선택합니다. 앱 인증에는 Internal Integration에서 발급한 `event:read`, `event:write` 토큰을 사용합니다. 개인 토큰 인증에는 해당 조직과 프로젝트에 접근할 수 있는 조직 구성원의 `org:write`, `event:read`, `event:write` 토큰을 사용합니다.
+4. Integration의 기존 Client Secret을 준비합니다. TypeClaw가 임의로 생성한 값으로 대체하면 서명 검증이 실패합니다.
+
+앱 인증을 기본 추천합니다. 개인 토큰은 필요하지 않으며, 이슈와 댓글 처리에는 앱 토큰만 사용합니다. Cloudflare Named Tunnel이나 외부 공개 URL을 준비하고, 그 고정 URL을 Sentry Integration의 Webhook URL에 직접 등록하세요. TypeClaw는 앱 인증에서 Integration 관리 API를 호출하지 않습니다. 이번 앱 인증은 Internal Integration 토큰을 사용하며, Public Integration의 OAuth 설치 흐름은 지원하지 않습니다.
+
+개인 토큰 인증에서는 [Custom Integration 수정 API](https://docs.sentry.io/api/integration/update-an-existing-custom-integration/)로 웹훅 URL과 Issues 구독을 갱신합니다. 이 경로는 주소가 바뀌는 Cloudflare Quick Tunnel도 사용할 수 있습니다. 개인 토큰 하나로 이슈와 댓글 처리 및 웹훅 설정 갱신을 수행하므로 앱 토큰을 추가로 준비할 필요는 없습니다.
+
+Integration 자체는 미리 생성하며, 채널 종료나 제거 시 삭제하지 않습니다. 여러 에이전트가 같은 Integration을 공유하면 웹훅 목적지가 겹치므로 에이전트마다 별도의 Integration을 사용하세요.
+
+## CLI
+
+```sh
+typeclaw channel add sentry
+typeclaw channel list
+typeclaw doctor
+typeclaw start --build
+```
+
+`channel add`와 초기화 마법사에서 앱 토큰 또는 개인 토큰을 선택합니다. 앱 토큰은 Named Tunnel, 외부 공개 URL, 나중에 설정 중 하나를 선택하고 Sentry에 고정 URL을 직접 등록합니다. 개인 토큰은 Quick Tunnel도 선택할 수 있으며, Quick Tunnel에는 Cloudflare 계정이 필요 없습니다. 최초로 Cloudflare 터널을 추가했다면 `start --build`로 cloudflared가 포함된 이미지를 만듭니다. 이미 실행 중이라면 `restart --build`를 사용합니다.
+
+```sh
+typeclaw channel set sentry
+typeclaw channel remove sentry
+```
+
+`set`은 인증 방식 전환, 토큰 교체와 Client Secret 교체를 지원합니다. 개인 토큰에서 앱 토큰으로 전환할 때 기존 고정 URL이 없으면 CLI가 준비한 외부 고정 URL을 입력받아 저장합니다. 이 URL을 Sentry에도 직접 등록하세요. `reauth`는 사용하지 않습니다. `remove`는 로컬 채널 설정, 인증 정보, 해당 채널 터널과 설정된 프로젝트의 member match 규칙을 제거합니다. 원격 Integration은 보존하므로 수신을 영구 종료하려면 Sentry에서도 해당 웹훅 설정을 변경하세요.
+
+## 대화와 응답
+
+댓글 조회와 작성은 Sentry의 공개 안정 API가 아닌 [Sentry 소스의 내부 댓글 API](https://github.com/getsentry/sentry/blob/master/src/sentry/issues/endpoints/group_notes.py)를 사용하므로 Sentry 버전에 따라 동작이 바뀔 수 있습니다.
+
+두 인증 방식 모두 각 이슈를 별도의 대화로 처리합니다. 에이전트 답변은 앱 인증에서 앱 전용 사용자, 개인 토큰 인증에서 토큰 소유자의 Sentry 이슈 댓글로 등록됩니다. `channel_read`의 history 모드로 이슈 댓글을 읽을 수 있으며, 개별 메시지 조회, 채널 목록, 메시지 수정, 리액션은 지원하지 않습니다.
+
+## 설정
+
+```json
+{
+  "channels": {
+    "sentry": {
+      "organization": "acme",
+      "integration": "typeclaw-agent",
+      "projects": ["web", "api"],
+      "webhookUrl": "https://agent.example.com/sentry",
+      "webhookPort": 8976
+    }
+  },
+  "roles": {
+    "member": {
+      "match": ["sentry:acme/web", "sentry:acme/api"]
+    }
+  }
+}
+```
+
+| 필드             | 의미                                                        |
+| ---------------- | ----------------------------------------------------------- |
+| `organization`   | 수신할 Sentry 조직 slug                                     |
+| `integration`    | 연결할 기존 Custom Integration slug                         |
+| `projects`       | 수신할 프로젝트 slug 목록. 빈 배열이면 수신하지 않음        |
+| `apiUrl`         | Sentry 서버 주소. 기본값 `https://sentry.io`                |
+| `webhookPort`    | 컨테이너 내부 수신 포트. 기본값 `8976`                      |
+| `webhookUrl`     | 직접 지정한 공개 URL. 지정하면 터널 주소보다 우선           |
+| `eventAllowlist` | 기본값 `issue.created`, `issue.regressed`, `issue.resolved` |
+
+실행 중 `apiUrl`, `organization`, `integration`, `webhookPort`, `webhookUrl`을 바꾸면 재시작이 필요합니다. `reload`는 기존 연결값을 유지하고 재시작 필요 항목을 표시하며, 프로젝트 목록과 이벤트 필터 및 참여 설정은 즉시 적용합니다.
+
+CLI는 `eventAllowlist`를 저장하지 않아 이후 버전의 기본값을 따릅니다. 직접 지정하면 해당 목록을 사용합니다. Sentry의 이벤트 구독과 TypeClaw의 필터는 별개이므로 Sentry 측에서 Issues 웹훅을 켜야 합니다.
+
+앱 인증의 `secrets.json`은 다음 형태입니다. 위 설정의 공개 URL을 Sentry에 직접 등록하고 해당 주소의 요청을 컨테이너 수신 포트로 전달하세요. 실제 인증 값을 Git에 커밋하지 마세요.
+
+```json
+{
+  "version": 2,
+  "channels": {
+    "sentry": {
+      "auth": {
+        "type": "app",
+        "token": { "value": "<Internal Integration 토큰>" }
+      },
+      "webhookSecret": { "value": "<Integration Client Secret>" }
+    }
+  }
+}
+```
+
+개인 토큰 인증은 `auth.type`을 `pat`으로 설정하고 `auth.token`에 개인 인증 토큰을 넣습니다. 공개 URL을 직접 지정하지 않고 Sentry 채널에 Quick Tunnel을 연결하면 시작할 때마다 URL을 자동 갱신합니다.
+
+수신부는 원본 요청 본문으로 `Sentry-Hook-Signature`를 검증하고 허용된 조직, 프로젝트, 이벤트만 라우터로 전달합니다. 재발은 `unresolved` 이벤트 중 `substatus`가 `regressed`인 경우입니다. 공통 채널 권한과 수신 저널을 사용하므로 HTTP 성공 응답만으로 에이전트 실행까지 완료되었다고 판단하지 마세요.
+
+## PR 전에 로컬 소스로 시험하기
+
+먼저 운영 에이전트와 분리된 임시 에이전트, 전용 Sentry Integration과 테스트 프로젝트를 사용합니다. 전역 `bun link`나 npm 배포는 필요 없습니다.
+
+```sh
+mkdir -p /tmp/typeclaw-sentry-trial/agent
+cd /tmp/typeclaw-sentry-trial/agent
+export TYPECLAW_HOME=/tmp/typeclaw-sentry-trial/host-state
+bun /absolute/path/to/typeclaw/src/cli/index.ts init
+```
+
+초기화 마법사에서 사용할 모델을 인증하고 Sentry를 선택합니다. 소스 저장소에서 실행한 CLI는 에이전트의 `package.json`에 `file:` 의존성을 기록합니다. 별도의 `TYPECLAW_HOME`은 hostd 소켓, 등록, 키와 모델 캐시를 기존 에이전트와 분리합니다. 이후 명령에서도 같은 값을 유지하세요.
+
+```sh
+bun /absolute/path/to/typeclaw/src/cli/index.ts restart --build
+bun /absolute/path/to/typeclaw/src/cli/index.ts tunnel status sentry-webhook
+bun /absolute/path/to/typeclaw/src/cli/index.ts logs
+```
+
+로컬 `file:` 의존성은 설치된 사본일 수 있습니다. `start`는 HEAD, 변경 내용, 새 파일의 fingerprint를 비교해 필요하면 강제 재설치합니다. 소스 수정 후 같은 로컬 CLI로 `restart`하세요. 로컬 의존성은 공개 GHCR 버전 이미지 대신 개발 이미지를 빌드하므로 미출시 코드를 시험할 수 있습니다.
+
+검증할 결과:
+
+1. 앱 인증은 직접 등록한 고정 URL로 수신하고 Integration 설정을 변경하지 않습니다. 개인 토큰 인증은 공개 URL과 Sentry Integration의 저장된 `webhookUrl`이 일치합니다.
+2. 새 이슈, 재발, 해결 이벤트가 해당 이슈 세션에 도착합니다. 다른 프로젝트와 잘못된 서명은 실행을 시작하지 않습니다.
+3. 중복 전달이 중복 실행을 만들지 않습니다.
+4. 공통 수신 저널과 세션에서 권한 승인, 에이전트 실행 결과를 확인합니다.
+5. 앱 인증은 재시작 후에도 같은 고정 URL로 새 이벤트가 도착합니다. 개인 토큰 인증은 바뀐 터널 URL이 Sentry에도 반영되고 새 이벤트가 다시 도착합니다.
+
+```sh
+bun /absolute/path/to/typeclaw/src/cli/index.ts stop
+```
+
+독립 시험 후 기존 에이전트에 적용하려면 현재 Git 상태와 `package.json`의 typeclaw 버전을 보존하고, 의존성을 `file:/absolute/path/to/typeclaw`로 바꾼 뒤 로컬 CLI로 재시작합니다. 시작 과정은 관리하는 Dockerfile, `.gitignore`, 의존성 파일을 갱신하거나 시스템 커밋을 만들 수 있습니다. 복구할 때는 컨테이너를 정상 종료하고 기존 버전과 설정을 복원한 뒤 기존 버전 CLI로 이미지를 다시 빌드합니다. 기존 에이전트의 메모리, 세션, 인증 정보는 시험용 디렉터리에 통째로 복사하지 않습니다.

@@ -5,10 +5,12 @@ import { defineCommand } from 'citty'
 import QRCode from 'qrcode'
 
 import { githubRequiredPermissionsNote } from '@/channels/adapters/github/permission-guidance'
+import { channelsSchema } from '@/channels/schema'
 import { config } from '@/config'
 import {
   listChannels,
   removeChannel,
+  setChannelWebhookUrl,
   type ChannelListEntry,
   type GithubConfigCleanup,
 } from '@/config/channels-mutation'
@@ -22,13 +24,19 @@ import {
   isInitialized,
   readConfiguredChannels,
   readGithubAuthType,
+  readSentryAuthType,
   runAddChannel,
   setChannelSecrets,
   setGithubSecrets,
+  setSentrySecrets,
   type AddChannelStepEvent,
   type ChannelKind,
   type DiscordAuthResult,
+  type SentryInitCredentials,
+  type SentryCredentialPatch,
+  type WebhookTunnelProvider,
   type GithubCredentialPatch,
+  type GithubInitCredentials,
   type GithubTunnelProvider,
   type InstagramAuthResult,
   type KakaotalkAuthResult,
@@ -52,6 +60,123 @@ import { CANCEL_SYMBOL, promptPrivateKeyPem } from './prompt-pem'
 import { displayQR } from './qr'
 import { c, done, errorLine, printDiscordInviteHint, printSlackAppManifestSetup, successLine } from './ui'
 
+export async function promptSentryCredentials(cwd: string): Promise<SentryInitCredentials | null> {
+  note(
+    'Sentry Custom Integration을 먼저 만들고 Issues 웹훅을 선택하세요. 앱 토큰은 event:read, event:write 권한과 고정 웹훅 URL을 사용합니다. 개인 토큰은 org:write 권한으로 웹훅 URL도 자동 갱신합니다.',
+    'Sentry 연결',
+  )
+  const authType = await select<'app' | 'pat'>({
+    message: 'Sentry 인증 방식',
+    options: [
+      { value: 'pat', label: '개인 인증 토큰' },
+      { value: 'app', label: 'Internal Integration 앱 토큰 (권장)' },
+    ],
+    initialValue: 'app',
+  })
+  if (isCancel(authType)) return null
+  const organization = await text({
+    message: 'Sentry 조직 slug',
+    validate: (v) =>
+      channelsSchema.unwrap().shape.sentry.unwrap().shape.organization.safeParse(v?.trim()).success
+        ? undefined
+        : '유효한 조직 slug를 입력하세요.',
+  })
+  if (isCancel(organization)) return null
+  const integration = await text({
+    message: 'Custom Integration slug',
+    validate: (v) =>
+      channelsSchema.unwrap().shape.sentry.unwrap().shape.integration.safeParse(v?.trim()).success
+        ? undefined
+        : '유효한 Integration slug를 입력하세요.',
+  })
+  if (isCancel(integration)) return null
+  const projects = await text({
+    message: '수신할 프로젝트 slug (쉼표로 구분, 비워 두면 수신하지 않음)',
+    validate: (v) =>
+      channelsSchema
+        .unwrap()
+        .shape.sentry.unwrap()
+        .shape.projects.safeParse(
+          (v ?? '')
+            .split(',')
+            .map((p) => p.trim())
+            .filter(Boolean),
+        ).success
+        ? undefined
+        : '유효한 프로젝트 slug를 쉼표로 구분해 입력하세요.',
+  })
+  if (isCancel(projects)) return null
+  const token = await promptSentryToken(authType)
+  if (isCancel(token)) return null
+  const webhookSecret = await password({
+    message: 'Custom Integration의 Client Secret',
+    validate: (v) => (v ? undefined : '기존 Client Secret을 입력하세요.'),
+  })
+  if (isCancel(webhookSecret)) return null
+  const apiUrl = await text({
+    message: 'Sentry API 서버 주소',
+    initialValue: 'https://sentry.io',
+    validate: (v) => validateUrl(v ?? '', 'API 서버 주소를 입력하세요.'),
+  })
+  if (isCancel(apiUrl)) return null
+  const tunnelProvider = await select<WebhookTunnelProvider>({
+    message: 'Sentry 웹훅 터널',
+    options: [
+      ...(authType === 'pat'
+        ? [{ value: 'cloudflare-quick' as const, label: 'Cloudflare Quick Tunnel (계정 불필요, 재시작 시 주소 변경)' }]
+        : []),
+      { value: 'cloudflare-named', label: 'Cloudflare Named Tunnel (고정 주소)' },
+      { value: 'external', label: '직접 준비한 공개 URL' },
+      { value: 'none', label: '나중에 설정' },
+    ],
+    initialValue: authType === 'app' ? 'cloudflare-named' : 'cloudflare-quick',
+  })
+  if (isCancel(tunnelProvider)) return null
+  const webhookUrl =
+    tunnelProvider === 'external'
+      ? await text({ message: '공개 웹훅 URL', validate: (v) => validateUrl(v ?? '', '웹훅 URL을 입력하세요.') })
+      : undefined
+  if (isCancel(webhookUrl)) return null
+  const named =
+    tunnelProvider === 'cloudflare-named'
+      ? await promptCloudflareNamedTunnel(cwd, 'SENTRY_CLOUDFLARE_TUNNEL_TOKEN')
+      : undefined
+  if (named === null) return null
+  const port = await text({
+    message: '컨테이너 내부 웹훅 수신 포트',
+    initialValue: '8976',
+    validate: (value) =>
+      channelsSchema.unwrap().shape.sentry.unwrap().shape.webhookPort.safeParse(Number(value)).success
+        ? undefined
+        : '1부터 65535 사이의 포트를 입력하세요.',
+  })
+  if (isCancel(port)) return null
+  if (authType === 'app') {
+    const fixedUrl = webhookUrl ?? named?.hostname
+    note(
+      fixedUrl
+        ? `Sentry 통합 설정에 웹훅 URL ${fixedUrl}를 직접 등록하세요. 앱 토큰은 통합의 웹훅 URL을 변경하지 않습니다.`
+        : '앱 인증은 고정 공개 URL이 필요합니다. URL을 준비한 뒤 Sentry 통합 설정에 직접 등록하세요.',
+      'Sentry 앱 웹훅',
+    )
+  }
+  return {
+    organization: organization.trim(),
+    integration: integration.trim(),
+    projects: (projects ?? '')
+      .split(',')
+      .map((p) => p.trim())
+      .filter(Boolean),
+    auth: { type: authType, token },
+    webhookPort: Number(port),
+    webhookSecret,
+    apiUrl,
+    tunnelProvider,
+    ...(webhookUrl !== undefined ? { webhookUrl } : {}),
+    ...named,
+  }
+}
+
 const CHANNEL_LABELS: Record<ChannelKind, string> = {
   'slack-bot': 'Slack',
   slack: 'Slack (User)',
@@ -65,6 +190,7 @@ const CHANNEL_LABELS: Record<ChannelKind, string> = {
   line: 'LINE',
   kakaotalk: 'KakaoTalk',
   github: 'GitHub',
+  sentry: 'Sentry',
 }
 
 const ADDABLE_CHANNEL_KINDS = CHANNEL_KINDS
@@ -105,6 +231,12 @@ const addSub = defineCommand({
         ...credentials,
         onProgress: reportProgress(events, lineSpinnerHolder),
       })
+      if (credentials.channel === 'sentry')
+        log.info(
+          credentials.auth.type === 'app'
+            ? 'Sentry 통합에 고정 웹훅 URL을 직접 등록한 뒤 에이전트를 시작하세요.'
+            : '에이전트를 시작하면 Sentry 웹훅 주소를 갱신합니다. Custom Integration은 유지됩니다.',
+        )
       if (credentials.channel === 'github' && credentials.tunnelProvider === 'none') {
         log.warn(
           'Webhook delivery is disabled until you add a `tunnels[]` entry or set `channels.github.webhookUrl` manually.',
@@ -126,7 +258,7 @@ const addSub = defineCommand({
 // is included here but routed through its own prompt path because it has
 // three independent secrets (PAT or App private key + webhook secret) and a
 // structural auth-type flip is forbidden during rotation.
-const SETTABLE_ADAPTERS = ['slack-bot', 'discord-bot', 'telegram-bot', 'webex-bot', 'github'] as const
+const SETTABLE_ADAPTERS = ['slack-bot', 'discord-bot', 'telegram-bot', 'webex-bot', 'github', 'sentry'] as const
 type SettableAdapter = (typeof SETTABLE_ADAPTERS)[number]
 
 const setSub = defineCommand({
@@ -303,6 +435,10 @@ const removeSub = defineCommand({
     }
 
     process.stdout.write(`${successLine(`Removed ${CHANNEL_LABELS[adapter]} channel.`)}\n`)
+    if (adapter === 'sentry')
+      log.info(
+        'Sentry Custom Integration은 삭제하지 않았습니다. 수신을 종료하려면 Sentry에서 해당 Integration의 웹훅 설정도 변경하세요.',
+      )
     if (result.githubCleanup !== undefined) printGithubCleanup(result.githubCleanup)
     if (result.hadRemoteWebhooks) {
       log.warn(
@@ -885,6 +1021,9 @@ async function runSet(cwd: string, adapter: SettableAdapter): Promise<void> {
     case 'slack-bot':
       await runSetSlack(cwd)
       break
+    case 'sentry':
+      await runSetSentry(cwd)
+      break
     case 'github':
       await runSetGithub(cwd)
       break
@@ -1017,6 +1156,7 @@ async function runSetGithub(cwd: string): Promise<void> {
 
 type CollectedCredentials =
   | { channel: 'discord'; runDiscordAuth: (options: { cwd: string }) => Promise<DiscordAuthResult> }
+  | ({ channel: 'sentry' } & SentryInitCredentials)
   | { channel: 'discord-bot'; discordBotToken: string }
   | {
       channel: 'slack'
@@ -1031,15 +1171,7 @@ type CollectedCredentials =
   | { channel: 'instagram'; runInstagramAuth: (options: { cwd: string }) => Promise<InstagramAuthResult> }
   | { channel: 'line'; runLineAuth: (options: { cwd: string }) => Promise<LineAuthResult> }
   | { channel: 'kakaotalk'; runKakaotalkAuth: (options: { cwd: string }) => Promise<KakaotalkAuthResult> }
-  | {
-      channel: 'github'
-      webhookSecret: string
-      tunnelProvider: GithubTunnelProvider
-      webhookUrl?: string
-      webhookPort?: number
-      repos: string[]
-      auth: { type: 'pat'; pat: string } | { type: 'app'; appId: number; privateKey: string; installationId?: number }
-    }
+  | ({ channel: 'github' } & GithubInitCredentials)
 
 async function collectCredentials(
   channel: ChannelKind,
@@ -1112,6 +1244,14 @@ async function collectCredentials(
           }),
       }
     }
+    case 'sentry': {
+      const creds = await promptSentryCredentials(cwd)
+      if (creds === null) {
+        cancel('취소했습니다.')
+        process.exit(0)
+      }
+      return { channel, ...creds }
+    }
     case 'github': {
       const creds = await promptGithubCredentials(cwd)
       return { channel, ...creds }
@@ -1133,16 +1273,104 @@ async function renderDiscordQrToTerminal(url: string): Promise<void> {
   )
 }
 
-async function promptGithubCredentials(cwd: string): Promise<{
-  webhookSecret: string
-  tunnelProvider: GithubTunnelProvider
-  webhookUrl?: string
-  webhookPort?: number
-  hostname?: string
-  tokenEnv?: string
-  repos: string[]
-  auth: { type: 'pat'; pat: string } | { type: 'app'; appId: number; privateKey: string; installationId?: number }
-}> {
+type SentrySetChoice = 'auth' | 'webhook' | 'both'
+
+async function runSetSentry(cwd: string): Promise<void> {
+  const authType = readSentryAuthType(cwd)
+  if (authType === null) {
+    console.error(errorLine('Sentry 인증 설정이 없습니다. `typeclaw channel add sentry`를 먼저 실행하세요.'))
+    process.exit(1)
+  }
+  const choice = await select<SentrySetChoice>({
+    message: '변경할 Sentry 인증 정보',
+    options: [
+      { value: 'auth', label: '인증 토큰 교체 또는 인증 방식 전환' },
+      { value: 'webhook', label: '웹훅 서명용 Client Secret 교체' },
+      { value: 'both', label: '인증 토큰과 Client Secret 모두 변경' },
+    ],
+    initialValue: 'auth',
+  })
+  if (isCancel(choice)) return
+  const patch: SentryCredentialPatch = {}
+  if (choice === 'auth' || choice === 'both') {
+    const auth = await promptSentryAuthUpdate(authType)
+    if (auth === null) return
+    patch.auth = auth
+  }
+  if (choice === 'webhook' || choice === 'both') {
+    const webhookSecret = await password({
+      message: 'Custom Integration의 새 Client Secret',
+      validate: (value) => (value ? undefined : '기존 Client Secret을 입력하세요.'),
+    })
+    if (isCancel(webhookSecret)) return
+    patch.webhookSecret = webhookSecret
+  }
+  let webhookUrl: string | undefined
+  if (patch.auth?.type === 'app') {
+    const tunnel = config.tunnels.find((entry) => entry.for.kind === 'channel' && entry.for.name === 'sentry')
+    const fixedUrl =
+      config.channels.sentry?.webhookUrl ??
+      (tunnel?.provider === 'cloudflare-named'
+        ? tunnel.hostname
+        : tunnel?.provider === 'external'
+          ? tunnel.externalUrl
+          : undefined)
+    if (fixedUrl === undefined) {
+      const entered = await text({
+        message: 'Sentry에 직접 등록할 고정 공개 웹훅 URL (준비한 외부 URL)',
+        validate: (value) => validateUrl(value ?? '', '고정 웹훅 URL을 입력하세요.'),
+      })
+      if (isCancel(entered)) return
+      webhookUrl = entered
+    }
+  }
+  const result = await setSentrySecrets(cwd, patch)
+  if (!result.ok) {
+    console.error(errorLine(result.reason))
+    process.exit(1)
+  }
+  if (webhookUrl !== undefined) {
+    const configured = setChannelWebhookUrl(cwd, 'sentry', webhookUrl)
+    if (!configured.ok) {
+      console.error(errorLine(configured.reason))
+      process.exit(1)
+    }
+    log.info(`Sentry 통합 설정에 고정 웹훅 URL ${webhookUrl}를 직접 등록하세요.`)
+  }
+  await maybePromptCredentialRefresh(cwd, CHANNEL_LABELS.sentry, 'credentials updated')
+}
+
+async function promptSentryAuthUpdate(currentType: 'app' | 'pat'): Promise<SentryInitCredentials['auth'] | null> {
+  const action = await select<'rotate' | 'switch'>({
+    message: 'Sentry 인증 변경 방식',
+    options: [
+      { value: 'rotate', label: currentType === 'app' ? '현재 앱 토큰 교체' : '현재 개인 토큰 교체' },
+      { value: 'switch', label: currentType === 'app' ? '개인 토큰으로 전환' : '앱 토큰으로 전환' },
+    ],
+    initialValue: 'rotate',
+  })
+  if (isCancel(action)) return null
+  const type = action === 'rotate' ? currentType : currentType === 'app' ? 'pat' : 'app'
+  const token = await promptSentryToken(type)
+  if (isCancel(token)) return null
+  if (type === 'app') note('고정 공개 URL을 사용하고 Sentry 통합 설정에 웹훅 URL을 직접 등록하세요.', 'Sentry 앱 웹훅')
+  return { type, token }
+}
+
+async function promptSentryToken(type: 'app' | 'pat'): Promise<string | symbol> {
+  note(
+    type === 'app'
+      ? 'Internal Integration의 event:read, event:write 권한 토큰을 사용하세요. 웹훅은 고정 URL을 직접 등록합니다.'
+      : '조직 구성원의 org:write, event:read, event:write 권한 개인 토큰을 사용하세요. 웹훅 URL은 자동 갱신합니다.',
+    type === 'app' ? 'Sentry 앱 인증' : 'Sentry 개인 인증',
+  )
+  return password({
+    message: type === 'app' ? 'Sentry Internal Integration 앱 토큰' : 'Sentry 개인 인증 토큰',
+    validate: (value) => (value ? undefined : '인증 토큰을 입력하세요.'),
+  })
+}
+
+async function promptGithubCredentials(cwd: string): Promise<GithubInitCredentials> {
   note(
     [
       'Choose PAT auth for a quick setup, or GitHub App auth for expiring installation tokens.',
@@ -1196,6 +1424,10 @@ async function promptGithubCredentials(cwd: string): Promise<{
     process.exit(0)
   }
   const namedCreds = tunnelProvider === 'cloudflare-named' ? await promptCloudflareNamedTunnel(cwd) : undefined
+  if (namedCreds === null) {
+    cancel('Aborted.')
+    process.exit(0)
+  }
   const port = await text({
     message: 'Local webhook port inside the agent container',
     initialValue: '8975',
@@ -1238,8 +1470,10 @@ async function promptGithubCredentials(cwd: string): Promise<{
   }
 }
 
-async function promptCloudflareNamedTunnel(cwd: string): Promise<{ hostname: string; tokenEnv: string }> {
-  const tokenEnv = 'CLOUDFLARE_TUNNEL_TOKEN'
+async function promptCloudflareNamedTunnel(
+  cwd: string,
+  tokenEnv = 'CLOUDFLARE_TUNNEL_TOKEN',
+): Promise<{ hostname: string; tokenEnv: string } | null> {
   note(
     [
       'Cloudflare Named Tunnel needs a tunnel you created in the Zero Trust dashboard:',
@@ -1254,19 +1488,13 @@ async function promptCloudflareNamedTunnel(cwd: string): Promise<{ hostname: str
     message: 'Public hostname configured in the dashboard (https://...)',
     validate: (value) => validateUrl(value ?? '', 'Hostname is required'),
   })
-  if (isCancel(hostname)) {
-    cancel('Aborted.')
-    process.exit(0)
-  }
+  if (isCancel(hostname)) return null
   if (!hasEnvKey(cwd, tokenEnv)) {
     const token = await password({
       message: `Cloudflare tunnel token (will be written to .env as ${tokenEnv})`,
       validate: (value) => (value && value.length > 0 ? undefined : 'Token is required'),
     })
-    if (isCancel(token)) {
-      cancel('Aborted.')
-      process.exit(0)
-    }
+    if (isCancel(token)) return null
     appendOrReplaceEnvKey(cwd, tokenEnv, token)
   }
   return { hostname, tokenEnv }

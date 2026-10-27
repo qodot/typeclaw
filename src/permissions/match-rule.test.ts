@@ -2,6 +2,32 @@ import { describe, expect, test } from 'bun:test'
 
 import { type MatchRule, parseMatchRule } from './match-rule'
 
+describe('Sentry 권한 범위', () => {
+  test('프로젝트와 특정 이슈 및 작성자 범위를 해석한다', () => {
+    expect(parseMatchRule('sentry:acme/backend')).toEqual({
+      ok: true,
+      value: { kind: 'channel', platform: 'sentry', workspace: 'acme/backend' },
+    })
+    expect(parseMatchRule('sentry:acme/backend/issue:42 author:123')).toEqual({
+      ok: true,
+      value: { kind: 'channel', platform: 'sentry', workspace: 'acme/backend', chat: 'issue:42', author: '123' },
+    })
+    expect(parseMatchRule('sentry:*')).toEqual({ ok: true, value: { kind: 'channel', platform: 'sentry' } })
+  })
+
+  test('프로젝트 누락과 부분 와일드카드 및 잘못된 이슈 좌표를 거부한다', () => {
+    for (const rule of [
+      'sentry:acme',
+      'sentry:acme/*',
+      'sentry:*/backend',
+      'sentry:acme/backend/42',
+      'sentry:acme/backend/issue:42/extra',
+    ]) {
+      expect(parseMatchRule(rule).ok).toBe(false)
+    }
+  })
+})
+
 describe('parseMatchRule — accepted forms', () => {
   const cases: { input: string; expected: MatchRule }[] = [
     { input: 'tui', expected: { kind: 'tui' } },

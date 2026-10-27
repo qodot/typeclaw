@@ -19,6 +19,79 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true })
 })
 
+test('잘못된 Sentry 프로젝트는 설정과 인증 파일을 변경하기 전에 거부한다', async () => {
+  const before = await readFile(join(root, 'typeclaw.json'), 'utf8')
+  const secretsBefore = await readFile(join(root, 'secrets.json'), 'utf8')
+  await expect(
+    runAddChannel({
+      cwd: root,
+      channel: 'sentry',
+      organization: 'acme',
+      integration: 'agent',
+      projects: ['web/other'],
+      auth: { type: 'pat', token: 'test-token' },
+      webhookSecret: 'secret',
+      tunnelProvider: 'cloudflare-quick',
+    }),
+  ).rejects.toThrow()
+  expect(await readFile(join(root, 'typeclaw.json'), 'utf8')).toBe(before)
+  expect(await readFile(join(root, 'secrets.json'), 'utf8')).toBe(secretsBefore)
+})
+
+test.each(['pat', 'app'] as const)(
+  'Sentry %s 채널 추가는 설정, 인증 정보, 터널, 프로젝트 권한을 함께 저장한다',
+  async (type) => {
+    await runAddChannel({
+      cwd: root,
+      channel: 'sentry',
+      organization: 'acme',
+      integration: 'agent',
+      projects: ['web', 'api'],
+      auth: { type, token: 'test-token' },
+      webhookSecret: 'existing-client-secret',
+      tunnelProvider: 'cloudflare-quick',
+    })
+    const config = await readConfig()
+    expect(config.channels?.sentry).toEqual({
+      organization: 'acme',
+      integration: 'agent',
+      projects: ['web', 'api'],
+      webhookPort: 8976,
+    })
+    expect(config.tunnels).toEqual([
+      { name: 'sentry-webhook', provider: 'cloudflare-quick', for: { kind: 'channel', name: 'sentry' } },
+    ])
+    expect(config.roles).toEqual({ member: { match: ['sentry:acme/web', 'sentry:acme/api'] } })
+    expect((await readSecretsChannels()).sentry).toEqual({
+      auth: { type, token: { value: 'test-token' } },
+      webhookSecret: { value: 'existing-client-secret' },
+    })
+    expect(await readConfiguredChannels(root)).toContain('sentry')
+  },
+)
+
+test('Sentry 외부 URL은 고정 주소로 저장하고 빈 프로젝트는 권한을 추가하지 않는다', async () => {
+  await runAddChannel({
+    cwd: root,
+    channel: 'sentry',
+    organization: 'acme',
+    integration: 'agent',
+    projects: [],
+    auth: { type: 'pat', token: 'test-token' },
+    webhookSecret: 'existing-client-secret',
+    tunnelProvider: 'external',
+    webhookUrl: 'https://hooks.example.com/sentry',
+    apiUrl: 'https://sentry.example.com',
+  })
+  const config = await readConfig()
+  expect(config.channels?.sentry).toMatchObject({
+    webhookUrl: 'https://hooks.example.com/sentry',
+    apiUrl: 'https://sentry.example.com',
+    projects: [],
+  })
+  expect(config.roles).toEqual({ member: { match: [] } })
+})
+
 async function readConfig(): Promise<{ channels?: Record<string, Record<string, unknown>>; [k: string]: unknown }> {
   return JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8')) as {
     channels?: Record<string, Record<string, unknown>>

@@ -2,6 +2,7 @@ export {
   type Channels,
   type GithubCliSecrets,
   type GithubSecretsBlock,
+  type SentrySecretsBlock,
   type McpCredential,
   type McpSlice,
 } from './schema'

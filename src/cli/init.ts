@@ -49,6 +49,7 @@ import {
   isInitialized,
   readExistingProviderApiKey,
   runInit,
+  type SentryInitCredentials,
   type GithubInitCredentials,
   type GithubTunnelProvider,
   type InitStep,
@@ -82,7 +83,7 @@ import {
 import { runWebexBootstrap } from '@/init/webex-auth'
 import type { TeamsAccountType } from '@/secrets/schema'
 
-import { teamsDeviceCodeCallbacks } from './channel'
+import { promptSentryCredentials, teamsDeviceCodeCallbacks } from './channel'
 import { fuzzyMatch } from './fuzzy-filter'
 import { buildOAuthCallbacks } from './oauth-callbacks'
 import { CANCEL_SYMBOL, promptPrivateKeyPem } from './prompt-pem'
@@ -234,6 +235,7 @@ export const init = defineCommand({
       webexEmail,
       webexPassword,
       teamsAccountType,
+      sentry: sentryCredentials,
       github: githubCredentials,
     } = channelSecrets
     const modelMeta = customModelMetaFromOption(model)
@@ -325,6 +327,7 @@ export const init = defineCommand({
                   }),
             }
           : {}),
+        ...(sentryCredentials !== undefined ? { withSentry: true, sentryCredentials } : {}),
         ...(wantsGithub
           ? {
               withGithub: true,
@@ -433,7 +436,7 @@ interface WizardState {
   channelReuseExisting?: boolean
 }
 
-type ChannelChoice = 'slack' | 'discord' | 'telegram' | 'webex' | 'teams' | 'kakaotalk' | 'github' | 'none'
+type ChannelChoice = 'slack' | 'discord' | 'telegram' | 'webex' | 'teams' | 'kakaotalk' | 'github' | 'sentry' | 'none'
 
 interface CollectedInputs {
   model: ModelOption
@@ -462,6 +465,7 @@ interface CollectedInputs {
     // tokens, so it rides as one sub-object instead of sibling fields.
     // `runInit` delegates to `runAddChannel` for GitHub to keep the github
     // config-writing in one place.
+    sentry?: SentryInitCredentials
     github?: GithubInitCredentials
   }
 }
@@ -1172,6 +1176,8 @@ function channelDisplayName(choice: Exclude<ChannelChoice, 'none'>): string {
       return 'Teams (User)'
     case 'kakaotalk':
       return 'KakaoTalk'
+    case 'sentry':
+      return 'Sentry'
     case 'github':
       return 'GitHub'
   }
@@ -1524,6 +1530,7 @@ async function pickChannel(initial: ChannelChoice | undefined): Promise<StepResu
       { value: 'teams', label: 'Teams (User)' },
       { value: 'kakaotalk', label: 'KakaoTalk' },
       { value: 'github', label: 'GitHub' },
+      { value: 'sentry', label: 'Sentry' },
       { value: 'none', label: 'Skip — no channel right now' },
     ],
     initialValue: initial ?? 'slack',
@@ -1551,6 +1558,10 @@ async function runChannelFlow(
       return runWebexUserFlow()
     case 'teams':
       return runTeamsFlow()
+    case 'sentry': {
+      const sentry = await promptSentryCredentials(cwd)
+      return sentry === null ? back() : value({ sentry })
+    }
     case 'github':
       return runGithubFlow(cwd)
   }

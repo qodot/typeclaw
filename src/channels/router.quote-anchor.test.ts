@@ -31,6 +31,13 @@ function hasLiveRuntimeMarker(text: string): boolean {
 }
 
 describe('formatAuthorAttribution', () => {
+  test('Sentry 작성자는 표시 이름과 식별자로 표현한다', () => {
+    expect(formatAuthorAttribution('sentry', '123', '민준')).toBe('민준 <123>')
+    expect(
+      renderQuoteAnchor({ adapter: 'sentry', authorId: '123', authorName: '민준', text: '문제를 해결했어요' }),
+    ).toBe('> 민준: 문제를 해결했어요')
+  })
+
   test('Slack transcript attribution includes display name and stable mention id', () => {
     expect(formatAuthorAttribution('slack-bot', 'U_ALICE', 'Alice')).toBe('Alice <@U_ALICE>')
   })

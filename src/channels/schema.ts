@@ -4,6 +4,7 @@ export const ADAPTER_IDS = [
   'discord',
   'discord-bot',
   'github',
+  'sentry',
   'instagram',
   'line',
   'kakaotalk',
@@ -31,6 +32,7 @@ export const ADAPTER_READ_CAPABILITIES: Record<AdapterId, readonly ReadCapabilit
   discord: ['history'],
   'discord-bot': ['history', 'message-get', 'list'],
   github: ['history'],
+  sentry: ['history'],
   instagram: ['history'],
   line: ['history'],
   kakaotalk: ['history'],
@@ -55,6 +57,7 @@ export const ADAPTER_WRITE_CAPABILITIES: Record<AdapterId, readonly WriteCapabil
   discord: ['message-edit'],
   'discord-bot': ['message-edit'],
   github: [],
+  sentry: [],
   instagram: [],
   line: [],
   kakaotalk: [],
@@ -328,6 +331,16 @@ const githubChannelSchema = adapterSchema.extend({
   review: githubReviewSchema,
 })
 
+const sentryChannelSchema = adapterSchema.extend({
+  organization: z.string().regex(/^(?![0-9]+$)[a-zA-Z0-9][a-zA-Z0-9-]*(?<!-)$/),
+  integration: z.string().regex(/^[^\s/:@*]+$/),
+  projects: z.array(z.string().regex(/^(?![0-9]+$)[a-z0-9_-]+$/)).default([]),
+  apiUrl: z.string().url().default('https://sentry.io'),
+  webhookUrl: z.string().url().optional(),
+  webhookPort: z.number().int().positive().max(65535).default(8976),
+  eventAllowlist: z.array(z.string()).default(['issue.created', 'issue.regressed', 'issue.resolved']),
+})
+
 // KakaoTalk uses the same shape as every other adapter. There used to be an
 // `autoMarkRead` opt-in here; the adapter now fires a LOCO NOTIREAD ack on
 // every inbound MSG event unconditionally (see kakaotalk.ts) so the sender's
@@ -343,6 +356,7 @@ export const channelsSchema = z
     discord: adapterSchema.optional(),
     'discord-bot': adapterSchema.optional(),
     github: githubChannelSchema.optional(),
+    sentry: sentryChannelSchema.optional(),
     // Instagram is a personal-account channel: plain-text sends only,
     // alias-only engagement in groups, and DM/group buckets backed by
     // secrets.json#channels.instagram credentials rather than env vars.
@@ -377,4 +391,5 @@ export type EngagementConfig = z.infer<typeof engagementSchema>
 export type ChannelAdapterConfig = z.infer<typeof adapterSchema>
 type ParsedGithubAdapterConfig = z.infer<typeof githubChannelSchema>
 export type GithubAdapterConfig = ParsedGithubAdapterConfig
+export type SentryAdapterConfig = z.infer<typeof sentryChannelSchema>
 export type ChannelsConfig = z.infer<typeof channelsSchema>

@@ -7,6 +7,7 @@ const ADAPTER_DISPLAY: Record<string, string> = {
   'discord-bot': 'Discord',
   discord: 'Discord',
   github: 'GitHub',
+  sentry: 'Sentry',
   'telegram-bot': 'Telegram',
   webex: 'Webex',
   'webex-bot': 'Webex',

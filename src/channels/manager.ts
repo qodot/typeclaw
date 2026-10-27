@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 
 import type { PermissionService } from '@/permissions'
-import type { GithubSecretsBlock } from '@/secrets'
+import type { GithubSecretsBlock, SentrySecretsBlock } from '@/secrets'
 import { SecretsDiscordCredentialStore } from '@/secrets/discord-store'
 import { SecretsInstagramCredentialStore } from '@/secrets/instagram-store'
 import { SecretsKakaoCredentialStore } from '@/secrets/kakao-store'
@@ -20,6 +20,7 @@ import { createGithubAdapter, type GithubAdapter } from './adapters/github'
 import { createInstagramAdapter, type InstagramAdapter } from './adapters/instagram'
 import { createKakaotalkAdapter, type KakaotalkAdapter } from './adapters/kakaotalk'
 import { createLineAdapter, type LineAdapter } from './adapters/line'
+import { createSentryAdapter, type SentryAdapter } from './adapters/sentry'
 import { createSlackAdapter, type SlackAdapter } from './adapters/slack'
 import { createSlackBotAdapter, type SlackBotAdapter, type SlackMessageObserver } from './adapters/slack-bot'
 import { createTeamsAdapter, type TeamsAdapter } from './adapters/teams'
@@ -45,6 +46,7 @@ import {
   type ChannelAdapterConfig,
   type ChannelsConfig,
   type GithubAdapterConfig,
+  type SentryAdapterConfig,
 } from './schema'
 
 export type ChannelManagerLogger = {
@@ -96,6 +98,7 @@ export type ChannelManagerOptions = {
   createDiscordAdapter?: typeof createDiscordBotAdapter
   createDiscordUserAdapter?: typeof createDiscordAdapter
   createGithubAdapter?: typeof createGithubAdapter
+  createSentryAdapter?: typeof createSentryAdapter
   createInstagramAdapter?: typeof createInstagramAdapter
   createKakaotalkAdapter?: typeof createKakaotalkAdapter
   createLineAdapter?: typeof createLineAdapter
@@ -184,6 +187,7 @@ type AnyAdapter =
   | DiscordAdapter
   | DiscordBotAdapter
   | GithubAdapter
+  | SentryAdapter
   | InstagramAdapter
   | LineAdapter
   | KakaotalkAdapter
@@ -280,6 +284,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
   const createDiscordBot = options.createDiscordAdapter ?? createDiscordBotAdapter
   const createDiscordUser = options.createDiscordUserAdapter ?? createDiscordAdapter
   const createGithub = options.createGithubAdapter ?? createGithubAdapter
+  const createSentry = options.createSentryAdapter ?? createSentryAdapter
   const createInstagram = options.createInstagramAdapter ?? createInstagramAdapter
   const createKakaotalk = options.createKakaotalkAdapter ?? createKakaotalkAdapter
   const createLine = options.createLineAdapter ?? createLineAdapter
@@ -325,6 +330,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
     if (name === 'slack') return buildSlackSignature(options.agentDir)
     if (name === 'discord') return buildDiscordSignature(options.agentDir)
     if (name === 'github') return buildGithubSignature(options.agentDir)
+    if (name === 'sentry') return buildSentrySignature(options.agentDir)
     const requiredEnvs = TOKEN_ENV[name]
     const parts: string[] = []
     const missing: string[] = []
@@ -457,6 +463,18 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
         tunnelUrl: () => options.tunnelUrlForChannel?.('github') ?? null,
         tunnelConfiguredForChannel: () => options.tunnelConfiguredForChannel?.('github') ?? false,
         ...(options.githubTokenBridge !== undefined ? { githubTokenBridge: options.githubTokenBridge } : {}),
+      })
+    }
+    if (name === 'sentry') {
+      const secrets = readSentrySecrets(options.agentDir)
+      if (secrets === null) return null
+      return createSentry({
+        router,
+        configRef: () => (options.channelsConfigRef()[name] ?? cfg) as SentryAdapterConfig,
+        secrets,
+        logger,
+        tunnelUrl: () => options.tunnelUrlForChannel?.('sentry') ?? null,
+        tunnelConfiguredForChannel: () => options.tunnelConfiguredForChannel?.('sentry') ?? false,
       })
     }
     if (name === 'telegram-bot') {
@@ -1054,7 +1072,10 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
 // secrets.json#channels.<adapter>, not in env, so they go through
 // structured-block signatures instead.
 const TOKEN_ENV: Record<
-  Exclude<AdapterId, 'kakaotalk' | 'line' | 'instagram' | 'github' | 'webex' | 'teams' | 'slack' | 'discord'>,
+  Exclude<
+    AdapterId,
+    'kakaotalk' | 'line' | 'instagram' | 'github' | 'sentry' | 'webex' | 'teams' | 'slack' | 'discord'
+  >,
   readonly string[]
 > = {
   'discord-bot': ['DISCORD_BOT_TOKEN'],
@@ -1289,6 +1310,21 @@ function isGithubSecretsBlock(value: unknown): value is GithubSecretsBlock {
   if (typeof auth !== 'object' || auth === null || Array.isArray(auth)) return false
   const authType = (auth as Record<string, unknown>).type
   return authType === 'pat' || authType === 'app'
+}
+
+function buildSentrySignature(agentDir: string): { signature: string; missing: string[] } {
+  const block = readSentrySecrets(agentDir)
+  if (block === null) return { signature: '', missing: ['secrets.json#channels.sentry'] }
+  const digest = createHash('sha256').update(JSON.stringify(block)).digest('hex')
+  return { signature: `secrets.json#channels.sentry@sha256:${digest}`, missing: [] }
+}
+
+function readSentrySecrets(agentDir: string): SentrySecretsBlock | null {
+  try {
+    return new SecretsBackend(join(agentDir, 'secrets.json')).tryReadChannelsSync()?.sentry ?? null
+  } catch {
+    return null
+  }
 }
 
 function isKakaoCredentialBlock(value: unknown): value is { accounts: Record<string, unknown> } {

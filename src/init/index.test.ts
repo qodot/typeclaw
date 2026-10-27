@@ -105,6 +105,54 @@ async function readSecrets(root: string): Promise<{
   }
 }
 
+test('Sentry 초기화에 인증 설정이 없으면 파일 생성 전에 실패한다', async () => {
+  await expect(
+    runInit({
+      cwd: root,
+      apiKey: 'test-key',
+      withSentry: true,
+      dockerExec: okDocker,
+      runBunInstall: okInstall,
+      runHatching: okHatch,
+    }),
+  ).rejects.toThrow('sentryCredentials')
+  expect(existsSync(join(root, 'typeclaw.json'))).toBe(false)
+  expect(existsSync(join(root, 'secrets.json'))).toBe(false)
+})
+
+test.each(['pat', 'app'] as const)('Sentry %s 초기화는 채널과 기존 Client Secret을 저장한다', async (type) => {
+  await runInit({
+    cwd: root,
+    model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+    apiKey: 'test-key',
+    withSentry: true,
+    sentryCredentials: {
+      organization: 'acme',
+      integration: 'agent',
+      projects: ['web'],
+      auth: { type, token: 'test-token' },
+      webhookSecret: 'existing-secret',
+      tunnelProvider: 'cloudflare-quick',
+    },
+    dockerExec: okDocker,
+    runBunInstall: okInstall,
+    runHatching: okHatch,
+  })
+  const config = JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8'))
+  const secrets = JSON.parse(await readFile(join(root, 'secrets.json'), 'utf8'))
+  expect(config.channels.sentry).toMatchObject({
+    organization: 'acme',
+    integration: 'agent',
+    projects: ['web'],
+    webhookPort: 8976,
+  })
+  expect(secrets.channels.sentry).toEqual({
+    auth: { type, token: { value: 'test-token' } },
+    webhookSecret: { value: 'existing-secret' },
+  })
+  expect(config.roles.member.match).toContain('sentry:acme/web')
+})
+
 describe('hatchingReadinessTimeoutMs', () => {
   test('gives Windows a larger cold-boot budget than other platforms', () => {
     const windows = hatchingReadinessTimeoutMs('win32')

@@ -3,6 +3,16 @@ import { describe, expect, test } from 'bun:test'
 import type { MatchRule } from './match-rule'
 import { type MatchableOrigin, matchesOrigin } from './resolve'
 
+test('Sentry 프로젝트 권한은 해당 조직과 프로젝트의 이슈에만 적용된다', () => {
+  const rule: MatchRule = { kind: 'channel', platform: 'sentry', workspace: 'acme/backend' }
+  const origin: MatchableOrigin = { kind: 'channel', adapter: 'sentry', workspace: 'acme/backend', chat: 'issue:42' }
+  expect(matchesOrigin(rule, origin)).toBe(true)
+  expect(matchesOrigin(rule, { ...origin, workspace: 'other/backend' })).toBe(false)
+  expect(matchesOrigin(rule, { ...origin, workspace: 'acme/frontend' })).toBe(false)
+  expect(matchesOrigin(rule, { ...origin, adapter: 'github' })).toBe(false)
+  expect(matchesOrigin({ ...rule, chat: 'issue:43' }, origin)).toBe(false)
+})
+
 const tui: MatchableOrigin = { kind: 'tui', sessionId: 's' }
 const cron: MatchableOrigin = { kind: 'cron', jobId: 'j' }
 const subagent: MatchableOrigin = { kind: 'subagent', subagent: 'memory-logger' }

@@ -11,6 +11,7 @@ const CHANNEL_LABELS: Record<ChannelKind, string> = {
   discord: 'Discord (User)',
   'discord-bot': 'Discord',
   github: 'GitHub',
+  sentry: 'Sentry',
   'telegram-bot': 'Telegram',
   webex: 'Webex (User)',
   'webex-bot': 'Webex',
@@ -40,7 +41,7 @@ export async function runOwnerClaim({ url, configuredChannels }: RunOwnerClaimOp
   // runAddChannel writes during init. Filtering here keeps the auto-claim
   // working for chat channels mixed with github, and skips the flow
   // entirely when github is the only wired channel.
-  const claimable = configuredChannels.filter((c) => c !== 'github')
+  const claimable = configuredChannels.filter((c) => c !== 'github' && c !== 'sentry')
   if (claimable.length === 0) return
 
   const channelList = claimable.map((c) => CHANNEL_LABELS[c] ?? c).join(', ')

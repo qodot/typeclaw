@@ -73,6 +73,12 @@ Old-epoch temporary owners are released on boot. Protected review/deferred-work 
 
 Credentials live in `secrets.json#channels.<adapter>` ([/reference/secrets-json](/docs/reference/secrets-json)).
 
+Set `channels.<adapter>.engagement.watchChannels` to workspace/channel ID pairs, such as
+`[{ "workspace": "T0123456789", "chat": "C0123456789" }]`, to wake the agent on new messages
+in those channels and their threads without mentions. The agent decides when to respond;
+access permissions and message filtering still apply. Changes take effect on `reload`.
+See [Slack bot](/docs/reference/slack-bot#watching-without-mentions) for an example.
+
 ## CLI verbs
 
 ```sh

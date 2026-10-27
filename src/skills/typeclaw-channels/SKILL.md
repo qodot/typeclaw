@@ -34,7 +34,7 @@ To stop the agent answering in a specific channel, narrow the `roles` block so t
 
 ### Engagement
 
-`engagement` controls when the agent's loop wakes up to reply on an inbound message it has permission to read. Two fields:
+`engagement` controls when the agent's loop wakes up to reply on an inbound message it has permission to read:
 
 ```json
 "engagement": {
@@ -49,11 +49,31 @@ To stop the agent answering in a specific channel, narrow the `roles` block so t
   - `dm` — any message in a DM channel.
 - **`stickiness`** — either the literal string `"off"`, or `{ perReply: { window: <ms> } }`. Default: 15-minute reply stickiness (`window: 900000`).
   - `perReply` means: after the agent replies to a user, follow-up messages from that same user in that same channel within the window also wake the loop, even without a mention. The window is bounded server-side (`1` to `86_400_000` ms — 1 ms to 24 hours).
-  - `"off"` disables stickiness — the agent only wakes on explicit triggers.
+  - `"off"` disables stickiness; aliases, watched channels and the solo-human fallback still apply.
 
 There is also a **solo-human fallback** built into the runtime that is **not configurable** through `engagement`: in any channel where the participants cache currently holds at most one distinct human author, every admitted inbound wakes the loop, regardless of `trigger` or `stickiness`. The fallback turns off the moment a second distinct human posts in that channel. This makes "private dev channel with one human and the bot" work without forcing an `@mention` on every message; clearing `trigger` to `[]` does **not** override it.
 
 **Engagement does not gate access.** Access is gated by `permissions.has(origin, 'channel.respond')` — see the `typeclaw-permissions` skill. Engagement decides whether an _admitted_ inbound wakes the loop or sits in the context buffer.
+
+### Watching without mentions
+
+`channels.<adapter>.engagement.watchChannels` is an array of `{ workspace: string, chat: string }` objects. An exact workspace/channel match wakes the agent on new messages in that channel and its threads, without a mention, alias or active sticky credit.
+
+```json
+"channels": {
+  "slack-bot": {
+    "engagement": {
+      "watchChannels": [{ "workspace": "T0123456789", "chat": "C0123456789" }]
+    }
+  }
+}
+```
+
+Use IDs, not names. An omitted or empty list preserves the existing behavior. Follow the monitoring instructions, reply or act only when useful, and otherwise use `NO_REPLY` or `skip_response`. Do not assume a watched message is addressed to you.
+
+Slack bots still need channel membership, the corresponding message event subscriptions and read scopes. Watching does not grant `channel.respond` or bypass message filters, deduplication, the peer-bot loop guard or explicit-only event restrictions. Changes take effect on `reload`.
+
+To stop watching, remove the entry from `watchChannels` and reload. The existing mention, alias, reply and follow-up rules then apply.
 
 ### Example
 
@@ -87,13 +107,13 @@ This is a **`roles`** edit, not a `channels` edit. See the `typeclaw-permissions
 Two interpretations — ask if unclear:
 
 - **"Stop everything"** — remove the match-rule from `roles.<role>.match`. The agent loses both inbound visibility and outbound posting on that channel.
-- **"Just stop auto-replying"** — leave the match-rule, but adjust `engagement` on the adapter (set `trigger: []` and/or `stickiness: "off"`). The agent can still receive the channel and can still post if you tell it to. Caveat: this approach does NOT silence the agent in a channel that currently has only one human posting — the solo-human fallback (see Engagement) overrides `trigger: []`. In that case the only way to go silent today is to remove the match-rule.
+- **"Just stop auto-replying"** — leave the match-rule, but adjust `engagement` on the adapter (remove any matching `watchChannels` entry and set `trigger: []` and/or `stickiness: "off"`). The agent can still receive the channel and can still post if you tell it to. Caveat: this approach does NOT silence the agent in a channel that currently has only one human posting — the solo-human fallback (see Engagement) overrides `trigger: []`. In that case the only way to go silent today is to remove the match-rule.
 
 The second is usually what people mean by "be quieter".
 
 ### When the user asks "what channels can you see / are you in"
 
-1. **Read `typeclaw.json`**, list each adapter under `channels`: which is enabled, the engagement triggers and stickiness window.
+1. **Read `typeclaw.json`**, list each adapter under `channels`: which is enabled, the engagement triggers, watched channels and stickiness window.
 2. Also read `roles.<role>.match` for every role — those are the actual admit lists.
 3. Note that the live runtime may have a different view if `typeclaw.json` was edited but `reload` hasn't run yet — say so when relevant.
 

@@ -139,6 +139,28 @@ In role match rules, DMs are addressed by the canonical `dm` **bucket** scope, n
 
 All fields above are shared across adapters. No adapter-specific extensions exist for `slack`. Credentials live in [`secrets.json#channels.slack`](/docs/reference/secrets-json).
 
+## Watching without mentions
+
+Add a workspace ID and channel ID to `engagement.watchChannels` to wake the agent on new messages in that channel and its threads, without a mention.
+
+```json
+{
+  "channels": {
+    "slack": {
+      "engagement": {
+        "watchChannels": [{ "workspace": "T0123456789", "chat": "C0123456789" }]
+      }
+    }
+  }
+}
+```
+
+Both IDs must match exactly; channel and workspace names are not accepted. Omit the list or use an empty array to keep the existing engagement rules. Changes take effect on `reload`.
+
+The agent uses its monitoring instructions and conversation context to decide whether to reply or act. It can stay silent with `NO_REPLY` or `skip_response`. Watching does not grant `channel.respond`; edit filtering, deduplication and the peer-bot loop guard still apply.
+
+The signed-in Slack account must belong to the channel. Watching does not expand its read access.
+
 ## See also
 
 - [Slack bot adapter](/docs/reference/slack-bot) — the recommended bot-application path

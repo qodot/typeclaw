@@ -130,6 +130,28 @@ Suppressed retries still associate their timestamp and client-message identities
 
 All fields above are shared across adapters. No adapter-specific extensions exist for `slack-bot`. Credentials live in [`secrets.json#channels.slack-bot`](/docs/reference/secrets-json).
 
+## Watching without mentions
+
+Add a workspace ID and channel ID to `engagement.watchChannels` to wake the agent on new messages in that channel and its threads, without a mention.
+
+```json
+{
+  "channels": {
+    "slack-bot": {
+      "engagement": {
+        "watchChannels": [{ "workspace": "T0123456789", "chat": "C0123456789" }]
+      }
+    }
+  }
+}
+```
+
+Both IDs must match exactly; channel and workspace names are not accepted. Omit the list or use an empty array to keep the existing engagement rules. Changes take effect on `reload`.
+
+The agent uses its monitoring instructions and conversation context to decide whether to reply or act. It can stay silent with `NO_REPLY` or `skip_response`. Watching does not grant `channel.respond`; edit filtering, deduplication and the peer-bot loop guard still apply.
+
+The bot must belong to the channel, and the Slack app needs the corresponding message event subscriptions and read scopes. Watching does not expand the events Slack delivers.
+
 ## See also
 
 - [Slack (user) adapter](/docs/reference/slack) — the personal-account alternative (unofficial QR session)

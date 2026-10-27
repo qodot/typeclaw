@@ -58,6 +58,7 @@ import {
   decideEngagement,
   grantStickyForReplyTargets,
   isMultiHumanGroup,
+  isWatchedChannel,
   StickyLedger,
   type EngagementDecision,
 } from './engagement'
@@ -988,6 +989,7 @@ type LiveSession = {
   typingTimer: ReturnType<typeof setInterval> | null
   typingStartedAt: number
   typingTimedOut: boolean
+  typingWorkStarted: boolean
   typingStopPromise: Promise<void> | null
   // Monotonic heartbeat generation. Captured when a heartbeat starts and
   // bumped when it stops. `clearInterval` cannot cancel a timer callback that
@@ -3312,6 +3314,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         typingTimer: null,
         typingStartedAt: 0,
         typingTimedOut: false,
+        typingWorkStarted: false,
         typingStopPromise: null,
         typingEpoch: 0,
         promptInFlight: false,
@@ -3776,7 +3779,12 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     // stop settles so the new `'tick'` is ordered strictly after the clear.
     const stopPromise = live.typingStopPromise
     if (stopPromise) {
-      void stopPromise.catch(() => undefined).then(() => restartTypingAfterTimeout(live))
+      const turnSeq = live.turnSeq
+      void stopPromise
+        .catch(() => undefined)
+        .then(() => {
+          if (live.turnSeq === turnSeq) restartTypingAfterTimeout(live)
+        })
       return
     }
     restartTypingAfterTimeout(live)
@@ -3800,14 +3808,34 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   }
 
   const subscribeTypingActivity = (session: AgentSession, live: LiveSession): (() => void) => {
+    let streamedText = ''
     return session.subscribe((event) => {
+      if (event.type === 'message_start') streamedText = ''
+      if (live.destroyed || !live.promptInFlight) return
+      if (event.type === 'tool_execution_start' && event.toolName !== 'skip_response') {
+        live.typingWorkStarted = true
+        startTypingHeartbeat(live)
+        reviveTypingActivity(live)
+        return
+      }
       if (event.type === 'tool_execution_end') {
         reviveTypingActivity(live)
         return
       }
       if (event.type !== 'message_update') return
-      const streamed = event.assistantMessageEvent.type
-      if (streamed === 'text_delta' || streamed === 'thinking_delta') {
+      const streamed = event.assistantMessageEvent
+      if (streamed.type === 'text_delta') {
+        streamedText += streamed.delta
+        const pendingSignal = streamedText
+          .trim()
+          .replace(/^[*_`(]+/u, '')
+          .replace(/[*_`)]+$/u, '')
+        if (!'NO_REPLY'.startsWith(pendingSignal) && !isNoReplySignal(streamedText)) {
+          live.typingWorkStarted = true
+          startTypingHeartbeat(live)
+        }
+      }
+      if (streamed.type === 'text_delta' || streamed.type === 'thinking_delta') {
         reviveTypingActivity(live)
       }
     })
@@ -4112,6 +4140,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   }
 
   const startTypingHeartbeat = (live: LiveSession): void => {
+    if (
+      isWatchedChannel({ ...live.key, room: live.room }, options.configForAdapter(live.key.adapter)?.engagement) &&
+      (!live.promptInFlight || !live.typingWorkStarted)
+    )
+      return
     if (live.typingTimedOut || live.typingStopPromise) return
     if (live.destroyed) return
     if (live.typingTimer) {
@@ -5175,6 +5208,13 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         !live.destroyed &&
         !live.pendingTeardown
       ) {
+        if (
+          live.promptQueue.length > 0 &&
+          isWatchedChannel({ ...live.key, room: live.room }, options.configForAdapter(live.key.adapter)?.engagement)
+        ) {
+          await stopTypingHeartbeat(live)
+          live.typingWorkStarted = false
+        }
         live.typingTimedOut = false
         // Each turn starts with no held reactions; the model re-requests them
         // via channel_react during this turn, and the finally flushes or drops.
@@ -5518,7 +5558,13 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           live.currentTurnExplicitlyAddressed =
             trigger.isDm || trigger.isBotMention || trigger.replyToBotMessageId !== null
           live.currentTurnHandoff = batch.some((m) => m.handoff === true)
-          live.currentTurnTypingThread = batch[batch.length - 1]!.typingThread ?? null
+          live.currentTurnTypingThread =
+            trigger.typingThread ??
+            (live.key.thread === null &&
+            (live.key.adapter === 'slack' || live.key.adapter === 'slack-bot') &&
+            isWatchedChannel({ ...live.key, room: live.room }, options.configForAdapter(live.key.adapter)?.engagement)
+              ? trigger.externalMessageId
+              : null)
           live.currentTurnEngageReactions = batch.flatMap((m) =>
             m.engageReaction !== undefined ? [m.engageReaction] : [],
           )
@@ -5655,6 +5701,9 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           adapter: live.key.adapter,
           loopGuardActive: live.loopGuardActive,
           groupChatNudge: live.multiHumanGroup,
+          watchChannel:
+            batch.length > 0 &&
+            isWatchedChannel({ ...live.key, room: live.room }, options.configForAdapter(live.key.adapter)?.engagement),
           systemReminders: reminders.map((r) => r.text),
           role: liveRole,
         })
@@ -5913,6 +5962,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       // to clear a flat-DM status; clearing it first would strand the indicator.
       await stopTypingHeartbeat(live)
       live.currentTurnTypingThread = null
+      live.typingWorkStarted = false
     }
     // A reload deferred this session's teardown so its in-flight reply could
     // land; now that the turn drained (and the loop stopped BEFORE draining any
@@ -6409,6 +6459,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       // engage so it self-clears once the first turn advances `turnSeq`; explicit
       // address (mention/reply/DM) keeps the historical silent-on-empty path.
       live.coldStartSoloFallbackTurnActive =
+        !isWatchedChannel(event, adapterConfig.engagement) &&
         live.createdFromColdStart &&
         live.turnSeq === 0 &&
         effectiveHumans <= 1 &&
@@ -6591,7 +6642,12 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     // Make the typing anchor live BEFORE startTypingHeartbeat fires (route()
     // starts the heartbeat right after enqueue, ahead of drain). drain() later
     // refreshes it to the last inbound of a coalesced batch.
-    if (event.typingThread !== undefined) live.currentTurnTypingThread = event.typingThread
+    if (
+      event.typingThread !== undefined &&
+      (!live.draining ||
+        !isWatchedChannel({ ...live.key, room: live.room }, options.configForAdapter(live.key.adapter)?.engagement))
+    )
+      live.currentTurnTypingThread = event.typingThread
   }
 
   const registerOutbound = (adapter: ChannelKey['adapter'], cb: OutboundCallback): void => {
@@ -6788,6 +6844,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   // cannot tell the sender their message is waiting. GitHub's fixed reaction
   // set has no hourglass, so it keeps :eyes:.
   const autoReactOnEngage = (event: InboundMessage, queuedBehindTurn: boolean): WaitingReactionHandle | null => {
+    if (isWatchedChannel(event, options.configForAdapter(event.adapter)?.engagement)) return null
     if (event.reactionRef === undefined) return null
     if (!queuedBehindTurn && typingCapableAdapters.has(event.adapter)) return null
     return waitingReactions.acquire({
@@ -10011,6 +10068,7 @@ export function composeTurnPrompt(
     adapter?: AdapterId
     loopGuardActive: boolean
     groupChatNudge?: boolean
+    watchChannel?: boolean
     systemReminders?: readonly string[]
     now?: Date
     role?: string
@@ -10090,7 +10148,24 @@ export function composeTurnPrompt(
   // The gate gets us into the turn; the model decides whether to speak.
   // Cache-neutral (user-turn suffix), and skipped when the loop guard already
   // fired to avoid stacking two silence notices in one turn.
-  if (state.groupChatNudge === true && !state.loopGuardActive) {
+  if (state.watchChannel === true && !state.loopGuardActive) {
+    parts.push(
+      '---',
+      '**[SYSTEM MESSAGE — not from a human]**',
+      '',
+      'Automated signal from the channel router, not a message from anyone in the chat.',
+      '**Do not acknowledge or reply to this notice.**',
+      '',
+      'You are watching this channel and are woken on each new message, including thread replies,',
+      'even when nobody mentions or addresses you. These messages are not necessarily requests to you.',
+      'Use the configured instructions and conversation context to decide whether a reply or action is needed.',
+      'Act when useful for the assigned monitoring task; a mention is not required.',
+      'Otherwise reply `NO_REPLY` or call `skip_response` to stay silent. When unsure, prefer silence.',
+      '',
+      '---',
+      '',
+    )
+  } else if (state.groupChatNudge === true && !state.loopGuardActive) {
     parts.push(
       '---',
       '**[SYSTEM MESSAGE — not from a human]**',
@@ -10172,7 +10247,8 @@ export function composeTurnPrompt(
       "The heading below marks this turn's new message, not the only message that may exist.",
       '',
     )
-    parts.push(batch.length === 1 ? '## Current message (addressed to you)' : '## Current messages (addressed to you)')
+    const currentMessageHeading = batch.length === 1 ? '## Current message' : '## Current messages'
+    parts.push(`${currentMessageHeading} (${state.watchChannel === true ? 'watched channel' : 'addressed to you'})`)
     for (const b of batch) {
       parts.push(formatInboundPromptLines(b, adapter))
     }

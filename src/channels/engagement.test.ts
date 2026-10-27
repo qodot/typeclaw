@@ -5,6 +5,7 @@ import type { ChannelParticipant } from '@/agent/session-origin'
 import {
   decideEngagement as decideEngagementRaw,
   grantStickyForReplyTargets,
+  isWatchedChannel,
   resolveEffectiveHumans,
   StickyLedger,
   type EngagementInput,
@@ -58,6 +59,97 @@ function inbound(over: Partial<InboundMessage> = {}): InboundMessage {
     ...over,
   }
 }
+
+function watchedInput(): EngagementInput {
+  return {
+    message: inbound({ adapter: 'slack-bot', workspace: 'T1', chat: 'C1', text: 'new message', ts: 1000 }),
+    config: { trigger: [], stickiness: 'off', watchChannels: [{ workspace: 'T1', chat: 'C1' }] },
+    key: 'slack-bot:T1:C1:',
+    ledger: new StickyLedger(),
+    now: 1000,
+    participants: crowded,
+    membership: null,
+    selfAliases: [],
+    botInThread: false,
+  }
+}
+
+describe('isWatchedChannel', () => {
+  test('requires an exact workspace and chat match', () => {
+    const config: EngagementConfig = {
+      trigger: [],
+      stickiness: 'off',
+      watchChannels: [
+        { workspace: 'T1', chat: 'C1' },
+        { workspace: 'T2', chat: 'C2' },
+      ],
+    }
+    expect(isWatchedChannel({ workspace: 'T1', chat: 'C1' }, config)).toBe(true)
+    expect(isWatchedChannel({ workspace: 'T2', chat: 'C2' }, config)).toBe(true)
+    expect(isWatchedChannel({ workspace: 'T1', chat: 'C2' }, config)).toBe(false)
+    expect(isWatchedChannel({ workspace: 'T2', chat: 'C1' }, config)).toBe(false)
+  })
+
+  test('does not watch when config or watchChannels is absent or empty', () => {
+    const key = { workspace: 'T1', chat: 'C1' }
+    expect(isWatchedChannel(key, undefined)).toBe(false)
+    expect(isWatchedChannel(key, { trigger: [], stickiness: 'off' })).toBe(false)
+    expect(isWatchedChannel(key, { trigger: [], stickiness: 'off', watchChannels: [] })).toBe(false)
+  })
+})
+
+describe('decideEngagement (watched channels)', () => {
+  test('engages Korean and English messages without a mention or alias', () => {
+    for (const text of ['새 배포가 실패했어요', 'The deployment failed']) {
+      const input = watchedInput()
+      input.message.text = text
+      expect(decideEngagement(input)).toBe('engage')
+    }
+  })
+
+  test("engages replies in another author's thread", () => {
+    const input = watchedInput()
+    input.message.thread = '1700000000.000100'
+    input.message.replyToOtherMessageId = '1700000000.000100'
+    input.message.mentionsOthers = true
+    expect(decideEngagement(input)).toBe('engage')
+  })
+
+  test('engages peer-bot messages under the same watch policy', () => {
+    const input = watchedInput()
+    input.message.authorIsBot = true
+    expect(decideEngagement(input)).toBe('engage')
+  })
+
+  test('engages separate thread channels through their watched parent', () => {
+    const input = watchedInput()
+    input.message.adapter = 'discord-bot'
+    input.message.chat = 'thread1'
+    input.message.room = { kind: 'thread', parentChat: 'C1' }
+    expect(isWatchedChannel(input.message, input.config)).toBe(true)
+    expect(decideEngagement(input)).toBe('engage')
+    input.message.room = { kind: 'thread', parentChat: 'C2' }
+    expect(isWatchedChannel(input.message, input.config)).toBe(false)
+    expect(decideEngagement(input)).toBe('observe')
+  })
+
+  test('preserves explicit-only admission for restricted events', () => {
+    const input = watchedInput()
+    input.message.suppressSticky = true
+    expect(decideEngagement(input)).toBe('observe')
+  })
+
+  test('observes ordinary messages in other channels or workspaces', () => {
+    for (const key of [
+      { workspace: 'T2', chat: 'C1' },
+      { workspace: 'T1', chat: 'C2' },
+    ]) {
+      const input = watchedInput()
+      Object.assign(input.message, key)
+      expect(decideEngagement(input)).toBe('observe')
+    }
+  })
+})
 
 describe('decideEngagement (explicit triggers)', () => {
   test('mention engages when trigger includes mention', () => {

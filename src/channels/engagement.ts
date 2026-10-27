@@ -101,6 +101,7 @@ export function decideEngagement(input: EngagementInput): EngagementDecision {
   if (config.trigger.includes('dm') && message.isDm) return 'engage'
   if (config.trigger.includes('mention') && message.isBotMention) return 'engage'
   if (config.trigger.includes('reply') && message.replyToBotMessageId !== null) return 'engage'
+  if (!message.suppressSticky && isWatchedChannel(message, config)) return 'engage'
 
   const explicitOnly = message.suppressSticky === true
 
@@ -240,6 +241,18 @@ export function decideEngagement(input: EngagementInput): EngagementDecision {
   if (effectiveHumans <= 1 && !message.authorIsBot) return 'engage'
 
   return 'observe'
+}
+
+export function isWatchedChannel(
+  key: Pick<InboundMessage, 'workspace' | 'chat' | 'room'>,
+  config: EngagementConfig | undefined,
+): boolean {
+  return (
+    config?.watchChannels?.some(
+      (channel) =>
+        channel.workspace === key.workspace && (channel.chat === key.chat || channel.chat === key.room?.parentChat),
+    ) === true
+  )
 }
 
 function isThreadRoom(message: InboundMessage): boolean {

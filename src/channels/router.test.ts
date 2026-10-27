@@ -132,6 +132,7 @@ import type {
   ReactionRef,
   ReactionResult,
   SendResult,
+  TypingTarget,
 } from './types'
 import { channelKeyId, fallbackChannelAccountIdentity } from './types'
 
@@ -1987,6 +1988,499 @@ describe('ChannelRouter ensureLive watchdog', () => {
     expect(router.liveCount()).toBe(1)
     expect(sessions).toHaveLength(1)
     expect(sessions[0]!.prompts).toHaveLength(1)
+  })
+})
+
+describe('ChannelRouter watched channels', () => {
+  const key: ChannelKey = { adapter: 'slack-bot', workspace: 'T1', chat: 'C1', thread: null }
+  const config: ChannelAdapterConfig = {
+    ...baseConfig,
+    engagement: {
+      trigger: [],
+      stickiness: 'off',
+      watchChannels: [{ workspace: key.workspace, chat: key.chat }],
+    },
+  }
+
+  test('prompts on every Korean message in a watched channel without explicit address', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir, {
+      config,
+      onSessionCreated: (session) => {
+        session.onPrompt = () => session.setAssistantText('NO_REPLY')
+      },
+    })
+    router.registerMembership('slack-bot', async () => ({ humans: 5, bots: 1, fetchedAt: 1000, truncated: false }))
+    try {
+      for (const [authorId, text] of [
+        ['alice', '주문 현황을 공유합니다'],
+        ['bob', '추가 주문이 들어왔어요'],
+      ] as const) {
+        const receipt = await router.route(inbound({ ...key, authorId, text, isBotMention: false }))
+        expect(receipt.kind).toBe('accepted')
+        await router.__testing!.flushDebounce(key)
+      }
+      expect(sessions).toHaveLength(1)
+      expect(sessions[0]!.prompts).toHaveLength(2)
+      const prompt = sessions[0]!.prompts[1]!
+      expect(prompt).toContain('추가 주문이 들어왔어요')
+      expect(prompt).toContain('## Current message (watched channel)')
+      expectFencedRuntimeNotice(prompt, 'You are watching this channel')
+      expect(prompt).toContain('NO_REPLY')
+      expect(prompt).toContain('skip_response')
+      expect(prompt).not.toContain('Reply ONLY if it is')
+      expect(prompt).not.toContain('## Current message (addressed to you)')
+    } finally {
+      await router.stop()
+    }
+  })
+
+  test("prompts on replies in another author's thread without a mention", async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir, {
+      config,
+      onSessionCreated: (session) => {
+        session.onPrompt = () => session.setAssistantText('NO_REPLY')
+      },
+    })
+    const threadKey = { ...key, thread: '1700000000.000100' }
+    router.registerMembership('slack-bot', async () => ({ humans: 5, bots: 1, fetchedAt: 1000, truncated: false }))
+    try {
+      const receipt = await router.route(
+        inbound({
+          ...threadKey,
+          text: '<@bob> 수량을 변경해 주세요',
+          isBotMention: false,
+          mentionsOthers: true,
+          replyToOtherMessageId: threadKey.thread,
+        }),
+      )
+      expect(receipt.kind).toBe('accepted')
+      await router.__testing!.flushDebounce(threadKey)
+      expect(sessions[0]!.prompts).toHaveLength(1)
+      expect(sessions[0]!.prompts[0]).toContain('수량을 변경해 주세요')
+      expect(sessions[0]!.prompts[0]).toContain('You are watching this channel')
+    } finally {
+      await router.stop()
+    }
+  })
+
+  test('watches Discord thread channels through their parent without automatic output', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir, {
+      config,
+      onSessionCreated: (session) => {
+        session.onPrompt = () => session.setAssistantText('NO_REPLY')
+      },
+    })
+    const threadKey: ChannelKey = { ...key, adapter: 'discord-bot', chat: 'thread123' }
+    const sent: OutboundMessage[] = []
+    const reactions: ReactionRequest[] = []
+    const typing: ChannelKey[] = []
+    router.registerMembership('discord-bot', async () => ({ humans: 5, bots: 1, fetchedAt: 1000, truncated: false }))
+    router.registerOutbound('discord-bot', async (message) => {
+      sent.push(message)
+      return { ok: true }
+    })
+    router.registerPrepareOwnReaction('discord-bot', async (request) => ({
+      accountIdentity: 'proof-account',
+      target: request.reactionRef,
+      emoji: request.emoji,
+    }))
+    router.registerReaction('discord-bot', async (request) => {
+      reactions.push(request)
+      return { ok: true }
+    })
+    router.registerTyping('discord-bot', async (target) => {
+      typing.push({ ...target, thread: target.thread ?? null })
+    })
+    try {
+      const receipt = await router.route(
+        inbound({
+          ...threadKey,
+          room: { kind: 'thread', parentChat: key.chat },
+          text: 'Sharing a status update in the thread',
+          isBotMention: false,
+          reactionRef: { adapter: 'discord-bot', value: 'watched-discord-thread' },
+        }),
+      )
+      expect(receipt.kind).toBe('accepted')
+      await router.__testing!.flushDebounce(threadKey)
+      expect(sessions[0]!.prompts).toHaveLength(1)
+      const prompt = sessions[0]!.prompts[0]!
+      expect(prompt).toContain('Sharing a status update in the thread')
+      expect(prompt).toContain('## Current message (watched channel)')
+      expectFencedRuntimeNotice(prompt, 'You are watching this channel')
+      expect(prompt).toContain('NO_REPLY')
+      expect(sent).toHaveLength(0)
+      expect(reactions).toHaveLength(0)
+      expect(typing).toHaveLength(0)
+    } finally {
+      await router.stop()
+    }
+  })
+
+  test('preserves observation for other chat IDs and workspaces', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir, { config })
+    router.registerMembership('slack-bot', async () => ({ humans: 5, bots: 1, fetchedAt: 1000, truncated: false }))
+    try {
+      for (const target of [
+        { ...key, chat: 'C2' },
+        { ...key, workspace: 'T2' },
+      ]) {
+        const receipt = await router.route(inbound({ ...target, text: 'ordinary chatter', isBotMention: false }))
+        expect(receipt.kind).toBe('observed')
+        await router.__testing!.flushDebounce(target)
+      }
+      expect(sessions.flatMap((session) => session.prompts)).toHaveLength(0)
+    } finally {
+      await router.stop()
+    }
+  })
+
+  test('denies watched messages from authors without channel.respond', async () => {
+    const dir = await tempDir()
+    const permissions: PermissionService = {
+      ...grantAllPermissions,
+      has: () => false,
+      resolveRole: () => 'guest',
+      describe: () => ({ role: 'guest', permissions: [] }),
+    }
+    const { router, sessions } = makeRouter(dir, { config, permissions })
+    try {
+      const receipt = await router.route(inbound({ ...key, text: 'order status update', isBotMention: false }))
+      expect(receipt.kind).toBe('denied')
+      expect(sessions).toHaveLength(0)
+    } finally {
+      await router.stop()
+    }
+  })
+
+  test('prompts once for duplicate deliveries in a watched channel', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir, {
+      config,
+      onSessionCreated: (session) => {
+        session.onPrompt = () => session.setAssistantText('NO_REPLY')
+      },
+    })
+    const message = inbound({ ...key, text: 'sharing a status update', isBotMention: false })
+    try {
+      expect((await router.route(message)).kind).toBe('accepted')
+      await router.__testing!.flushDebounce(key)
+      expect((await router.route(message)).kind).toBe('duplicate')
+      await router.__testing!.flushDebounce(key)
+      expect(sessions[0]!.prompts).toHaveLength(1)
+    } finally {
+      await router.stop()
+    }
+  })
+
+  test('sends no message or automatic indicator when a watched turn returns NO_REPLY', async () => {
+    const dir = await tempDir()
+    const sent: OutboundMessage[] = []
+    const reactions: ReactionRequest[] = []
+    const typing: ChannelKey[] = []
+    const { router, sessions } = makeRouter(dir, {
+      config,
+      onSessionCreated: (session) => {
+        session.onPrompt = () => session.setAssistantText('NO_REPLY')
+      },
+    })
+    router.registerOutbound('slack-bot', async (message) => {
+      sent.push(message)
+      return { ok: true }
+    })
+    router.registerPrepareOwnReaction('slack-bot', async (request) => ({
+      accountIdentity: 'proof-account',
+      target: request.reactionRef,
+      emoji: request.emoji,
+    }))
+    router.registerReaction('slack-bot', async (request) => {
+      reactions.push(request)
+      return { ok: true }
+    })
+    router.registerTyping('slack-bot', async (target) => {
+      typing.push({ ...target, thread: target.thread ?? null })
+    })
+    try {
+      await router.route(
+        inbound({
+          ...key,
+          text: 'sharing for context',
+          isBotMention: false,
+          reactionRef: { adapter: 'slack-bot', value: 'watched-message' },
+        }),
+      )
+      await router.__testing!.flushDebounce(key)
+      expect(sessions[0]!.prompts).toHaveLength(1)
+      expect(sent).toHaveLength(0)
+      expect(reactions).toHaveLength(0)
+      expect(typing).toHaveLength(0)
+    } finally {
+      await router.stop()
+    }
+  })
+
+  test('shows watched-channel work in the original Slack message thread and clears it at completion', async () => {
+    const dir = await tempDir()
+    const typing: TypingTarget[] = []
+    let releasePrompt: (() => void) | undefined
+    const { router, sessions } = makeRouter(dir, {
+      config,
+      onSessionCreated: (session) => {
+        session.onPrompt = async () => {
+          await new Promise<void>((resolve) => {
+            releasePrompt = resolve
+          })
+          session.setAssistantText('NO_REPLY')
+        }
+      },
+    })
+    router.registerTyping('slack-bot', async (target) => {
+      typing.push(target)
+    })
+    let draining: Promise<void> | undefined
+    try {
+      await router.route(inbound({ ...key, externalMessageId: '1700000000.000101', isBotMention: false }))
+      expect(typing).toHaveLength(0)
+      draining = router.__testing!.flushDebounce(key)
+      await waitFor(() => releasePrompt !== undefined)
+      expect(typing).toHaveLength(0)
+      sessions[0]!.emit({ type: 'tool_execution_start', toolCallId: 'work', toolName: 'bash', args: {} })
+      await waitFor(() => typing.some((target) => target.phase === 'tick'))
+      expect(typing[0]).toMatchObject({ ...key, typingThread: '1700000000.000101', phase: 'tick' })
+      releasePrompt!()
+      await draining
+      expect(typing.at(-1)).toMatchObject({ ...key, typingThread: '1700000000.000101', phase: 'stop' })
+      const completed = typing.length
+      sessions[0]!.emit({ type: 'tool_execution_end', toolCallId: 'work', toolName: 'bash', isError: false })
+      sessions[0]!.emit({ type: 'tool_execution_start', toolCallId: 'late', toolName: 'bash', args: {} })
+      await Promise.resolve()
+      expect(typing).toHaveLength(completed)
+    } finally {
+      releasePrompt?.()
+      await draining
+      await router.stop()
+    }
+  })
+
+  test('keeps skipped watched turns quiet through thinking and split or wrapped NO_REPLY output', async () => {
+    const dir = await tempDir()
+    const typing: TypingTarget[] = []
+    const { router, sessions } = makeRouter(dir, {
+      config,
+      onSessionCreated: (session) => {
+        session.onPrompt = () => {
+          session.emit({ type: 'message_start' })
+          session.emit({ type: 'tool_execution_start', toolCallId: 'skip', toolName: 'skip_response', args: {} })
+          session.emit({ type: 'tool_execution_end', toolCallId: 'skip', toolName: 'skip_response', isError: false })
+          session.emit({
+            type: 'message_update',
+            assistantMessageEvent: { type: 'thinking_delta', delta: '이 알림에는 응답하지 않아도 됩니다' },
+          })
+          const chunks = session.prompts.length === 1 ? ['NO_', 'RE', 'PLY'] : ['**', 'NO_', 'REPLY', '**']
+          for (const delta of chunks) {
+            session.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta } })
+          }
+          session.setAssistantText(chunks.join(''))
+        }
+      },
+    })
+    router.registerTyping('slack-bot', async (target) => {
+      typing.push(target)
+    })
+    try {
+      for (const externalMessageId of ['1700000000.000102', '1700000000.000103']) {
+        await router.route(inbound({ ...key, externalMessageId, isBotMention: false }))
+        await router.__testing!.flushDebounce(key)
+      }
+      expect(sessions[0]!.prompts).toHaveLength(2)
+      expect(typing).toHaveLength(0)
+    } finally {
+      await router.stop()
+    }
+  })
+
+  test('shows typing when a watched turn starts writing a Korean answer without tools', async () => {
+    const dir = await tempDir()
+    const typing: TypingTarget[] = []
+    let releasePrompt: (() => void) | undefined
+    const { router, sessions } = makeRouter(dir, {
+      config,
+      onSessionCreated: (session) => {
+        session.onPrompt = async () => {
+          await new Promise<void>((resolve) => {
+            releasePrompt = resolve
+          })
+          session.setAssistantText('NO_REPLY')
+        }
+      },
+    })
+    router.registerTyping('slack-bot', async (target) => {
+      typing.push(target)
+    })
+    let draining: Promise<void> | undefined
+    try {
+      await router.route(inbound({ ...key, externalMessageId: '1700000000.000104', isBotMention: false }))
+      draining = router.__testing!.flushDebounce(key)
+      await waitFor(() => releasePrompt !== undefined)
+      sessions[0]!.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: '원인은 ' } })
+      await waitFor(() => typing.some((target) => target.phase === 'tick'))
+      expect(typing[0]).toMatchObject({ ...key, typingThread: '1700000000.000104', phase: 'tick' })
+      releasePrompt!()
+      await draining
+      expect(typing.at(-1)).toMatchObject({ typingThread: '1700000000.000104', phase: 'stop' })
+    } finally {
+      releasePrompt?.()
+      await draining
+      await router.stop()
+    }
+  })
+
+  test('retains the active watched alert anchor and clears it before a queued silent alert', async () => {
+    const dir = await tempDir()
+    const typing: TypingTarget[] = []
+    let releaseFirstPrompt: (() => void) | undefined
+    let typingBeforeSecondPrompt: TypingTarget[] | undefined
+    const { router, sessions } = makeRouter(dir, {
+      config,
+      onSessionCreated: (session) => {
+        session.onPrompt = async () => {
+          if (session.prompts.length === 1) {
+            await new Promise<void>((resolve) => {
+              releaseFirstPrompt = resolve
+            })
+          } else {
+            typingBeforeSecondPrompt = [...typing]
+          }
+          session.setAssistantText('NO_REPLY')
+        }
+      },
+    })
+    router.registerTyping('slack-bot', async (target) => {
+      typing.push(target)
+    })
+    let draining: Promise<void> | undefined
+    try {
+      await router.route(inbound({ ...key, externalMessageId: '1700000000.000105', isBotMention: false }))
+      draining = router.__testing!.flushDebounce(key)
+      await waitFor(() => releaseFirstPrompt !== undefined)
+      sessions[0]!.emit({ type: 'tool_execution_start', toolCallId: 'work', toolName: 'bash', args: {} })
+      await waitFor(() => typing.some((target) => target.phase === 'tick'))
+      await router.route(inbound({ ...key, externalMessageId: '1700000000.000106', isBotMention: false }))
+      await router.__testing!.fireTypingInterval(key)
+      expect(
+        typing
+          .filter((target) => target.phase === 'tick')
+          .every((target) => target.typingThread === '1700000000.000105'),
+      ).toBe(true)
+      releaseFirstPrompt!()
+      await draining
+      expect(sessions[0]!.prompts).toHaveLength(2)
+      expect(typingBeforeSecondPrompt?.at(-1)).toMatchObject({ typingThread: '1700000000.000105', phase: 'stop' })
+      expect(
+        typing
+          .filter((target) => target.phase === 'tick')
+          .every((target) => target.typingThread === '1700000000.000105'),
+      ).toBe(true)
+      expect(router.__testing!.isTypingActive(key)).toBe(false)
+    } finally {
+      releaseFirstPrompt?.()
+      await draining
+      await router.stop()
+    }
+  })
+
+  test('preserves the loop-guard notice for unmentioned peer-bot messages', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir, {
+      config,
+      onSessionCreated: (session) => {
+        session.onPrompt = () => session.setAssistantText('NO_REPLY')
+      },
+    })
+    try {
+      for (let index = 0; index < 5; index++) {
+        const receipt = await router.route(
+          inbound({
+            ...key,
+            authorId: `peer-${index}`,
+            authorIsBot: true,
+            text: 'sharing status',
+            isBotMention: false,
+          }),
+        )
+        expect(receipt.kind).toBe('accepted')
+        await router.__testing!.flushDebounce(key)
+      }
+      expect(sessions[0]!.prompts).toHaveLength(5)
+      expect(sessions[0]!.prompts[0]).toContain('You are watching this channel')
+      expectFencedRuntimeNotice(sessions[0]!.prompts[4]!, 'Peer bots have engaged you')
+    } finally {
+      await router.stop()
+    }
+  })
+
+  test('returns to observation after watching is disabled and still handles mentions', async () => {
+    const dir = await tempDir()
+    const mutableConfig: ChannelAdapterConfig = {
+      ...config,
+      engagement: { ...config.engagement, trigger: ['mention'] },
+    }
+    const { router, sessions } = makeRouter(dir, {
+      config: mutableConfig,
+      onSessionCreated: (session) => {
+        session.onPrompt = () => session.setAssistantText('NO_REPLY')
+      },
+    })
+    router.registerMembership('slack-bot', async () => ({ humans: 5, bots: 1, fetchedAt: 1000, truncated: false }))
+    try {
+      expect((await router.route(inbound({ ...key, text: 'watching this channel', isBotMention: false }))).kind).toBe(
+        'accepted',
+      )
+      await router.__testing!.flushDebounce(key)
+      mutableConfig.engagement.watchChannels = []
+      expect((await router.route(inbound({ ...key, text: 'ordinary chatter', isBotMention: false }))).kind).toBe(
+        'observed',
+      )
+      await router.__testing!.flushDebounce(key)
+      expect(sessions[0]!.prompts).toHaveLength(1)
+      expect((await router.route(inbound({ ...key, text: 'please check this', isBotMention: true }))).kind).toBe(
+        'accepted',
+      )
+      await router.__testing!.flushDebounce(key)
+      expect(sessions[0]!.prompts).toHaveLength(2)
+      expect(sessions[0]!.prompts[1]).toContain('please check this')
+      expect(sessions[0]!.prompts[1]).not.toContain('You are watching this channel')
+      expect(sessions[0]!.prompts[1]).toContain('## Current message (addressed to you)')
+    } finally {
+      await router.stop()
+    }
+  })
+
+  test('does not retry or notify on an empty first watched turn', async () => {
+    const dir = await tempDir()
+    const sent: OutboundMessage[] = []
+    const { router, sessions } = makeRouter(dir, {
+      config,
+      onSessionCreated: (session) => {
+        session.onPrompt = () => session.setAssistantText('')
+      },
+    })
+    router.registerOutbound('slack-bot', async (message) => {
+      sent.push(message)
+      return { ok: true }
+    })
+    try {
+      await router.route(inbound({ ...key, text: 'just chatting', isBotMention: false }))
+      await router.__testing!.flushDebounce(key)
+      expect(sessions[0]!.prompts).toHaveLength(1)
+      expect(sent).toHaveLength(0)
+    } finally {
+      await router.stop()
+    }
   })
 })
 

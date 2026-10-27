@@ -3,7 +3,16 @@ import { readFile, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { readGithubAuthType, runAddChannel, scaffold, setChannelSecrets, setGithubSecrets, writeSecrets } from './index'
+import {
+  readGithubAuthType,
+  readSentryAuthType,
+  runAddChannel,
+  scaffold,
+  setChannelSecrets,
+  setGithubSecrets,
+  setSentrySecrets,
+  writeSecrets,
+} from './index'
 
 let root: string
 
@@ -15,6 +24,163 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await rm(root, { recursive: true, force: true })
+})
+
+test('Sentry 토큰 교체는 기존 Client Secret을 보존한다', async () => {
+  await runAddChannel({
+    cwd: root,
+    channel: 'sentry',
+    organization: 'acme',
+    integration: 'agent',
+    projects: ['web'],
+    auth: { type: 'pat', token: 'old-token' },
+    webhookSecret: 'client-secret',
+    tunnelProvider: 'none',
+  })
+  expect(await setSentrySecrets(root, { auth: { type: 'pat', token: 'new-token' } })).toEqual({ ok: true })
+  expect((await readSecrets()).channels?.sentry).toEqual({
+    auth: { type: 'pat', token: { value: 'new-token' } },
+    webhookSecret: { value: 'client-secret' },
+  })
+})
+
+describe('Sentry 인증 교체', () => {
+  test.each(['pat', 'app'] as const)(
+    '같은 %s 인증 토큰 교체는 환경변수 연결과 웹훅 비밀값을 보존한다',
+    async (type) => {
+      await writeFile(
+        join(root, 'secrets.json'),
+        JSON.stringify({
+          version: 2,
+          channels: {
+            sentry: {
+              auth: { type, token: { value: 'old-token', env: 'CUSTOM_SENTRY_TOKEN' } },
+              webhookSecret: { value: 'old-secret', env: 'CUSTOM_SENTRY_SECRET' },
+            },
+            'discord-bot': { token: { value: 'discord-token' } },
+          },
+        }),
+      )
+      expect(await setSentrySecrets(root, { auth: { type, token: 'new-token' } })).toEqual({ ok: true })
+      expect((await readSecrets()).channels).toEqual({
+        sentry: {
+          auth: { type, token: { value: 'new-token', env: 'CUSTOM_SENTRY_TOKEN' } },
+          webhookSecret: { value: 'old-secret', env: 'CUSTOM_SENTRY_SECRET' },
+        },
+        'discord-bot': { token: { value: 'discord-token' } },
+      })
+      expect(readSentryAuthType(root)).toBe(type)
+    },
+  )
+
+  test.each(['pat', 'app'] as const)(
+    '%s 인증으로 전환할 때 이전 인증 토큰의 환경변수 연결을 승계하지 않는다',
+    async (type) => {
+      const previousType = type === 'pat' ? 'app' : 'pat'
+      await writeFile(
+        join(root, 'secrets.json'),
+        JSON.stringify({
+          version: 2,
+          channels: {
+            sentry: {
+              auth: { type: previousType, token: { value: 'old-token', env: 'PREVIOUS_TOKEN' } },
+              webhookSecret: { value: 'secret' },
+            },
+          },
+        }),
+      )
+      expect(await setSentrySecrets(root, { auth: { type, token: 'new-token' } })).toEqual({ ok: true })
+      expect((await readSecrets()).channels?.sentry).toEqual({
+        auth: { type, token: { value: 'new-token' } },
+        webhookSecret: { value: 'secret' },
+      })
+      expect(readSentryAuthType(root)).toBe(type)
+    },
+  )
+
+  test('웹훅 비밀값만 교체하면 인증 정보와 기존 환경변수 연결을 보존한다', async () => {
+    await writeFile(
+      join(root, 'secrets.json'),
+      JSON.stringify({
+        version: 2,
+        channels: {
+          sentry: {
+            auth: { type: 'app', token: { value: 'token', env: 'APP_TOKEN' } },
+            webhookSecret: { value: 'old-secret', env: 'WEBHOOK_SECRET' },
+          },
+        },
+      }),
+    )
+    expect(await setSentrySecrets(root, { webhookSecret: 'new-secret' })).toEqual({ ok: true })
+    expect((await readSecrets()).channels?.sentry).toEqual({
+      auth: { type: 'app', token: { value: 'token', env: 'APP_TOKEN' } },
+      webhookSecret: { value: 'new-secret', env: 'WEBHOOK_SECRET' },
+    })
+  })
+
+  test('인증과 웹훅 비밀값을 동시에 교체한다', async () => {
+    await runAddChannel({
+      cwd: root,
+      channel: 'sentry',
+      organization: 'acme',
+      integration: 'agent',
+      projects: ['web'],
+      auth: { type: 'pat', token: 'old-token' },
+      webhookSecret: 'old-secret',
+      tunnelProvider: 'none',
+    })
+    expect(
+      await setSentrySecrets(root, {
+        auth: { type: 'app', token: 'app-token' },
+        webhookSecret: 'new-secret',
+      }),
+    ).toEqual({ ok: true })
+    expect((await readSecrets()).channels?.sentry).toEqual({
+      auth: { type: 'app', token: { value: 'app-token' } },
+      webhookSecret: { value: 'new-secret' },
+    })
+  })
+
+  test('빈 교체 요청은 파일을 변경하지 않는다', async () => {
+    const before = await readFile(join(root, 'secrets.json'), 'utf8')
+    expect(await setSentrySecrets(root, {})).toEqual({ ok: true })
+    expect(await readFile(join(root, 'secrets.json'), 'utf8')).toBe(before)
+  })
+
+  test('등록하지 않은 Sentry 인증 교체는 실패를 반환한다', async () => {
+    expect(await setSentrySecrets(root, { webhookSecret: 'secret' })).toMatchObject({ ok: false })
+    expect(readSentryAuthType(root)).toBeNull()
+  })
+
+  test('손상된 인증 파일은 교체 실패와 인증 유형 없음으로 반환한다', async () => {
+    await writeFile(join(root, 'secrets.json'), '{ malformed')
+    expect(await setSentrySecrets(root, { webhookSecret: 'secret' })).toMatchObject({ ok: false })
+    expect(readSentryAuthType(root)).toBeNull()
+    expect(await readFile(join(root, 'secrets.json'), 'utf8')).toBe('{ malformed')
+  })
+
+  test('인증 유형이 잘못된 파일은 교체 실패와 인증 유형 없음으로 반환한다', async () => {
+    await writeFile(
+      join(root, 'secrets.json'),
+      JSON.stringify({
+        version: 2,
+        channels: { sentry: { auth: { type: 'unknown', token: 'token' }, webhookSecret: 'secret' } },
+      }),
+    )
+    expect(await setSentrySecrets(root, { webhookSecret: 'secret' })).toMatchObject({ ok: false })
+    expect(readSentryAuthType(root)).toBeNull()
+  })
+
+  test('초기화되지 않은 폴더는 빈 교체 요청도 실패를 반환한다', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'typeclaw-sentry-empty-'))
+    try {
+      expect(await setSentrySecrets(cwd, { webhookSecret: 'secret' })).toMatchObject({ ok: false })
+      expect(await setSentrySecrets(cwd, {})).toMatchObject({ ok: false })
+      expect(readSentryAuthType(cwd)).toBeNull()
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
 })
 
 async function readSecrets(): Promise<{

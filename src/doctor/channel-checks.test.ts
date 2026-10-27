@@ -76,6 +76,8 @@ describe('buildChannelChecks', () => {
       'channel.instagram.credentials',
       'channel.line.credentials',
       'channel.kakaotalk.credentials',
+      'channel.sentry.credentials',
+      'channel.sentry.webhook-delivery',
       'channel.github.credentials',
       'channel.github.webhook-delivery',
       'channel.github.event-allowlist',
@@ -324,6 +326,49 @@ describe('buildChannelChecks', () => {
       const result = await runCheck('channel.teams.credentials', ctxFor(cwd))
       expect(result.status).toBe('ok')
       expect(result.message).toContain('access_token')
+    })
+  })
+
+  describe('Sentry 상태', () => {
+    test('인증 정보와 Client Secret이 있으면 정상이다', async () => {
+      const cwd = makeTmpAgentDir({ sentry: { organization: 'acme', integration: 'agent', projects: ['web'] } })
+      writeChannelsSecrets(cwd, {
+        sentry: { auth: { type: 'pat', token: { value: 'test-token' } }, webhookSecret: { value: 'test-secret' } },
+      })
+      expect((await runCheck('channel.sentry.credentials', ctxFor(cwd))).status).toBe('ok')
+    })
+    test('인증 정보가 없으면 복구 방법을 알린다', async () => {
+      const cwd = makeTmpAgentDir({ sentry: { organization: 'acme', integration: 'agent', projects: ['web'] } })
+      const result = await runCheck('channel.sentry.credentials', ctxFor(cwd))
+      expect(result.status).toBe('error')
+      expect(result.fix?.description).toContain('channel set sentry')
+    })
+    test('앱 인증의 고정 웹훅 URL과 직접 등록 방법을 안내한다', async () => {
+      const cwd = makeTmpAgentDir({
+        sentry: {
+          organization: 'acme',
+          integration: 'agent',
+          projects: ['web'],
+          webhookUrl: 'https://hooks.example.com/sentry',
+        },
+      })
+      writeChannelsSecrets(cwd, { sentry: { auth: { type: 'app', token: 'app-token' }, webhookSecret: 'secret' } })
+      expect((await runCheck('channel.sentry.credentials', ctxFor(cwd))).status).toBe('ok')
+      const result = await runCheck('channel.sentry.webhook-delivery', ctxFor(cwd))
+      expect(result.status).toBe('ok')
+      expect(result.message).toContain('https://hooks.example.com/sentry')
+      expect(result.message).toContain('직접 등록')
+    })
+    test('앱 인증에 고정 주소가 없으면 필요한 설정을 안내한다', async () => {
+      const cwd = makeTmpAgentDir({ sentry: { organization: 'acme', integration: 'agent', projects: ['web'] } })
+      writeChannelsSecrets(cwd, { sentry: { auth: { type: 'app', token: 'app-token' }, webhookSecret: 'secret' } })
+      const result = await runCheck('channel.sentry.webhook-delivery', ctxFor(cwd))
+      expect(result.status).toBe('warning')
+      expect(result.fix?.description).toContain('Named Tunnel')
+    })
+    test('프로젝트가 비어 있으면 수신하지 않음을 알린다', async () => {
+      const cwd = makeTmpAgentDir({ sentry: { organization: 'acme', integration: 'agent', projects: [] } })
+      expect((await runCheck('channel.sentry.webhook-delivery', ctxFor(cwd))).status).toBe('warning')
     })
   })
 

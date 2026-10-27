@@ -12,7 +12,7 @@ import {
   type ChannelManagerOptions,
   createChannelManager as createChannelManagerImpl,
 } from './manager'
-import { defaultHistoryConfig, type ChannelAdapterConfig, type ChannelsConfig } from './schema'
+import { channelsSchema, defaultHistoryConfig, type ChannelAdapterConfig, type ChannelsConfig } from './schema'
 import type { ChannelKey, InboundMessage } from './types'
 
 type FakeAdapter = {
@@ -274,6 +274,39 @@ function fakeRecoveryClock(
 const flushManagerWork = async (): Promise<void> => {
   await new Promise((resolve) => setTimeout(resolve, 0))
 }
+
+describe('Sentry 채널 수명주기', () => {
+  test('인증 변경은 재시작 필요 상태로 보고하고 명시적 적용으로 갱신한다', async () => {
+    cfg = channelsSchema.parse({ sentry: { organization: 'acme', integration: 'typeclaw', projects: ['backend'] } })
+    await writeSentrySecrets(agentDir, 'first-token')
+    const manager = createChannelManager({
+      agentDir,
+      channelsConfigRef: () => cfg,
+      createSentryAdapter: () => makeFakeAdapter(),
+    })
+    await manager.start()
+    await writeSentrySecrets(agentDir, 'second-token')
+    const pending = await manager.reload()
+    expect(pending.restartRequired).toContain('sentry (token rotation)')
+    const applied = await manager.reload({ applyCredentialRotation: 'sentry' })
+    expect(applied.restarted).toEqual(['sentry'])
+    expect(applied.credentialApply).toEqual({ adapter: 'sentry', outcome: 'restarted' })
+  })
+
+  test('인증이 제거되면 실행 중인 Sentry 채널을 중지한다', async () => {
+    cfg = channelsSchema.parse({ sentry: { organization: 'acme', integration: 'typeclaw', projects: ['backend'] } })
+    await writeSentrySecrets(agentDir, 'test-token')
+    const manager = createChannelManager({
+      agentDir,
+      channelsConfigRef: () => cfg,
+      createSentryAdapter: () => makeFakeAdapter(),
+    })
+    await manager.start()
+    await writeFile(join(agentDir, 'secrets.json'), JSON.stringify({ version: 2, channels: {} }))
+    const result = await manager.reload()
+    expect(result.stopped).toEqual(['sentry'])
+  })
+})
 
 describe('channel manager — connection recovery', () => {
   test('restarts a live adapter that remains disconnected past the grace period', async () => {
@@ -2127,3 +2160,13 @@ describe('channel manager — router adapter-configured wiring', () => {
     await mgr.stop()
   })
 })
+
+async function writeSentrySecrets(dir: string, token: string): Promise<void> {
+  await writeFile(
+    join(dir, 'secrets.json'),
+    JSON.stringify({
+      version: 2,
+      channels: { sentry: { auth: { type: 'pat', token }, webhookSecret: 'test-webhook-secret' } },
+    }),
+  )
+}

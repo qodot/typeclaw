@@ -6497,6 +6497,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   }
 
   const updateLoopGuard = (live: LiveSession, event: InboundMessage): void => {
+    if (
+      event.adapter === 'sentry' &&
+      ['issue.created', 'issue.regressed', 'issue.resolved'].includes(event.eventKind ?? '')
+    )
+      return
     if (!event.authorIsBot) {
       live.recentEngagedPeerBotTurns.length = 0
       live.consecutiveEngagedPeerBotTurns = 0
@@ -10282,6 +10287,7 @@ export function formatAuthorAttribution(adapter: AdapterId, authorId: string, au
     case 'teams':
     case 'instagram':
     case 'line':
+    case 'sentry':
     case 'kakaotalk':
       return hasDisplayName ? `${displayName} <${id}>` : id
   }
@@ -10316,6 +10322,7 @@ function formatAuthorReference(adapter: AdapterId, authorId: string, authorName:
     case 'teams':
     case 'instagram':
     case 'line':
+    case 'sentry':
     case 'kakaotalk':
       return displayName
   }

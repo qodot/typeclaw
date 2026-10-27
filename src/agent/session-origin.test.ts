@@ -8,6 +8,19 @@ import {
   type SessionOrigin,
 } from './session-origin'
 
+test('Sentry 세션은 이슈 좌표와 플랫폼 이름을 안내한다', () => {
+  const text = renderSessionOrigin({
+    kind: 'channel',
+    adapter: 'sentry',
+    workspace: 'acme/backend',
+    chat: 'issue:42',
+    thread: null,
+  })
+  expect(text).toContain('Sentry')
+  expect(text).toContain('acme/backend')
+  expect(text).toContain('issue:42')
+})
+
 describe('subagentDepth', () => {
   test('non-subagent origins are depth 0', () => {
     expect(subagentDepth(undefined)).toBe(0)

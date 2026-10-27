@@ -38,6 +38,8 @@ export function buildChannelChecks(): DoctorCheck[] {
     instagramCredentials(),
     lineCredentials(),
     kakaotalkCredentials(),
+    sentryCredentials(),
+    sentryWebhookDelivery(),
     githubCredentials(),
     githubWebhookDelivery(),
     githubEventAllowlist(),
@@ -265,6 +267,80 @@ function kakaotalkCredentials(): DoctorCheck {
         }
       }
       return { status: 'ok', message: `kakaotalk has ${accountCount} account(s)` }
+    },
+  }
+}
+
+function sentryCredentials(): DoctorCheck {
+  return {
+    name: 'channel.sentry.credentials',
+    category: 'channels',
+    description: 'Sentry 인증 토큰과 Client Secret 확인',
+    applies: (ctx) => ctx.hasAgentFolder,
+    async run(ctx) {
+      const channels = readDeclaredChannels(ctx)
+      if (channels === null) return configInvalidResult()
+      if (!isAdapterActive(channels, 'sentry'))
+        return { status: 'skipped', message: 'Sentry 채널이 설정되지 않았습니다.' }
+      const block = readChannelsSecrets(ctx)?.sentry
+      const dotEnv = safeReadEnvFile(ctx.cwd)
+      const missing: string[] = []
+      if (block === undefined || !resolveSecretHostStage(block.auth.token, dotEnv)) missing.push('auth.token')
+      if (block === undefined || !resolveSecretHostStage(block.webhookSecret, dotEnv)) missing.push('webhookSecret')
+      return missing.length === 0
+        ? { status: 'ok', message: 'Sentry 인증 토큰과 Client Secret을 읽었습니다.' }
+        : {
+            status: 'error',
+            message: `Sentry 인증 정보가 비어 있습니다: ${missing.join(', ')}`,
+            fix: { description: '`typeclaw channel set sentry`로 인증 정보를 설정하세요.' },
+          }
+    },
+  }
+}
+
+function sentryWebhookDelivery(): DoctorCheck {
+  return {
+    name: 'channel.sentry.webhook-delivery',
+    category: 'channels',
+    description: 'Sentry 공개 웹훅 주소와 프로젝트 확인',
+    applies: (ctx) => ctx.hasAgentFolder,
+    async run(ctx) {
+      const cfg = safeLoadConfig(ctx)
+      if (cfg === null) return configInvalidResult()
+      const sentry = cfg.channels.sentry
+      if (sentry === undefined || !sentry.enabled)
+        return { status: 'skipped', message: 'Sentry 채널이 설정되지 않았습니다.' }
+      if (sentry.projects.length === 0)
+        return { status: 'warning', message: 'Sentry projects가 비어 있어 이벤트를 수신하지 않습니다.' }
+      if (readChannelsSecrets(ctx)?.sentry?.auth.type === 'app') {
+        const tunnel = cfg.tunnels.find((t) => t.for.kind === 'channel' && t.for.name === 'sentry')
+        const fixedUrl =
+          sentry.webhookUrl ??
+          (tunnel?.provider === 'cloudflare-named'
+            ? tunnel.hostname
+            : tunnel?.provider === 'external'
+              ? tunnel.externalUrl
+              : undefined)
+        return fixedUrl === undefined
+          ? {
+              status: 'warning',
+              message: 'Sentry 앱 인증에는 고정 웹훅 URL이 필요합니다.',
+              fix: { description: 'Named Tunnel 또는 고정 외부 URL을 설정하고 Sentry 통합에 직접 등록하세요.' },
+            }
+          : {
+              status: 'ok',
+              message: `Sentry 앱 웹훅 고정 주소: ${fixedUrl}. Sentry 통합 설정에도 직접 등록하세요.`,
+            }
+      }
+      const hasUrl =
+        sentry.webhookUrl !== undefined || cfg.tunnels.some((t) => t.for.kind === 'channel' && t.for.name === 'sentry')
+      return hasUrl
+        ? { status: 'ok', message: 'Sentry 웹훅 공개 주소가 설정되었습니다.' }
+        : {
+            status: 'warning',
+            message: 'Sentry 웹훅 공개 주소가 없습니다.',
+            fix: { description: '`channels.sentry.webhookUrl` 또는 Sentry 채널 터널을 설정하세요.' },
+          }
     },
   }
 }

@@ -187,6 +187,13 @@ const PLATFORM_INFO: Record<AdapterId, PlatformInfo> = {
     supportsReactions: true,
     supportsAttachments: false,
   },
+  sentry: {
+    displayName: 'Sentry',
+    mentionMode: 'alias',
+    plainTextOnly: false,
+    supportsReactions: false,
+    supportsAttachments: false,
+  },
   instagram: {
     displayName: 'Instagram',
     mentionMode: 'alias',

@@ -3,6 +3,35 @@ import { describe, expect, test } from 'bun:test'
 import { parseSecretsFile, SECRETS_FILE_VERSION } from './schema'
 
 describe('parseSecretsFile (v2 envelope)', () => {
+  test('Sentry 앱 토큰과 개인 토큰을 동일한 인증 구조로 정규화한다', () => {
+    for (const type of ['app', 'pat'] as const) {
+      const result = parseSecretsFile({
+        version: 2,
+        channels: {
+          sentry: { auth: { type, token: 'test-token' }, webhookSecret: { env: 'SENTRY_WEBHOOK_SECRET' } },
+        },
+      })
+      expect(result.ok).toBe(true)
+      if (!result.ok) continue
+      expect(result.file.channels.sentry).toEqual({
+        auth: { type, token: { value: 'test-token' } },
+        webhookSecret: { env: 'SENTRY_WEBHOOK_SECRET' },
+      })
+    }
+  })
+
+  test('Sentry 인증은 지원하는 방식과 토큰 및 서명 비밀값이 모두 있어야 한다', () => {
+    for (const sentry of [
+      { auth: { type: 'app', token: 'test-token' } },
+      { webhookSecret: 'test-secret' },
+      { auth: { type: 'pat', token: '' }, webhookSecret: 'test-secret' },
+      { auth: { type: 'other', token: 'test-token' }, webhookSecret: 'test-secret' },
+      { auth: { token: 'test-token' }, webhookSecret: 'test-secret' },
+    ]) {
+      expect(parseSecretsFile({ version: 2, channels: { sentry } }).ok).toBe(false)
+    }
+  })
+
   test('accepts string-shorthand Secret for api-key key', () => {
     const result = parseSecretsFile({
       version: 2,

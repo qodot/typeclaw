@@ -20,6 +20,95 @@ describe('createConfigReloadable', () => {
     await rm(cwd, { recursive: true, force: true })
   })
 
+  test('Sentry 연결 설정은 재시작 전까지 유지하고 처리 정책과 GitHub 설정은 즉시 적용한다', async () => {
+    const sentry = {
+      organization: 'acme',
+      integration: 'agent',
+      projects: ['backend'],
+      apiUrl: 'https://sentry.io',
+      webhookPort: 8976,
+      webhookUrl: 'https://old.example.com',
+    }
+    await writeFile(
+      join(cwd, 'typeclaw.json'),
+      JSON.stringify({ model: VALID_MODEL_A, channels: { sentry, github: { repos: ['acme/old'] } } }),
+    )
+    const reloadable = createConfigReloadable({ cwd })
+    await reloadable.reload()
+    const changed = {
+      ...sentry,
+      organization: 'other',
+      integration: 'new-agent',
+      apiUrl: 'https://sentry.example.com',
+      webhookPort: 9976,
+      webhookUrl: 'https://new.example.com',
+      projects: ['frontend'],
+      eventAllowlist: ['issue.created'],
+      engagement: { stickiness: 'off' },
+    }
+    await writeFile(
+      join(cwd, 'typeclaw.json'),
+      JSON.stringify({ model: VALID_MODEL_A, channels: { sentry: changed, github: { repos: ['acme/new'] } } }),
+    )
+    const result = await reloadable.reload()
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const diff = result.details as { applied: { path: string }[]; restartRequired: { path: string }[] }
+    expect(diff.restartRequired.map((change) => change.path).sort()).toEqual(
+      [
+        'channels.sentry.apiUrl',
+        'channels.sentry.organization',
+        'channels.sentry.integration',
+        'channels.sentry.webhookPort',
+        'channels.sentry.webhookUrl',
+      ].sort(),
+    )
+    expect(diff.applied.map((change) => change.path)).toEqual(['channels'])
+    expect(getConfig().channels.sentry).toMatchObject({
+      ...sentry,
+      projects: ['frontend'],
+      eventAllowlist: ['issue.created'],
+      engagement: { stickiness: 'off' },
+    })
+    expect(getConfig().channels.github?.repos).toEqual(['acme/new'])
+    const repeated = await reloadable.reload()
+    expect(repeated.ok).toBe(true)
+    if (!repeated.ok) return
+    expect((repeated.details as { restartRequired: unknown[] }).restartRequired).toHaveLength(5)
+    expect((repeated.details as { applied: unknown[] }).applied).toEqual([])
+  })
+
+  test('Sentry 신규 추가와 비활성화 후 재활성화는 새 연결 설정을 적용한다', async () => {
+    const reloadable = createConfigReloadable({ cwd })
+    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: VALID_MODEL_A }))
+    await reloadable.reload()
+    const sentry = { organization: 'acme', integration: 'agent', projects: ['backend'] }
+    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: VALID_MODEL_A, channels: { sentry } }))
+    const added = await reloadable.reload()
+    expect(added.ok).toBe(true)
+    if (!added.ok) return
+    expect((added.details as { restartRequired: unknown[] }).restartRequired).toEqual([])
+    expect(getConfig().channels.sentry?.organization).toBe('acme')
+    await writeFile(
+      join(cwd, 'typeclaw.json'),
+      JSON.stringify({
+        model: VALID_MODEL_A,
+        channels: { sentry: { ...sentry, enabled: false, organization: 'other' } },
+      }),
+    )
+    await reloadable.reload()
+    expect(getConfig().channels.sentry).toMatchObject({ enabled: false, organization: 'other' })
+    await writeFile(
+      join(cwd, 'typeclaw.json'),
+      JSON.stringify({ model: VALID_MODEL_A, channels: { sentry: { ...sentry, organization: 'new-org' } } }),
+    )
+    await reloadable.reload()
+    expect(getConfig().channels.sentry).toMatchObject({ enabled: true, organization: 'new-org' })
+    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: VALID_MODEL_A }))
+    await reloadable.reload()
+    expect(getConfig().channels.sentry).toBeUndefined()
+  })
+
   test('atomicity: invalid JSON leaves the live config untouched', async () => {
     await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: VALID_MODEL_A, port: 9001 }))
     const reloadable = createConfigReloadable({ cwd })

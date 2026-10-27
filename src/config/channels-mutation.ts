@@ -1,8 +1,11 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
+import { channelsSchema } from '@/channels/schema'
 import { commitSystemFileSync } from '@/git/system-commit'
 import { SecretsBackend } from '@/secrets'
+
+import { validateConfig } from './config'
 
 const CONFIG_FILE = 'typeclaw.json'
 const SECRETS_FILE = 'secrets.json'
@@ -20,6 +23,7 @@ export const CHANNEL_KINDS = [
   'line',
   'kakaotalk',
   'github',
+  'sentry',
 ] as const
 
 export type ChannelKind = (typeof CHANNEL_KINDS)[number]
@@ -99,13 +103,22 @@ export function removeChannel(cwd: string, kind: ChannelKind): RemoveChannelResu
     return { ok: false, reason: `Channel "${kind}" is not configured in ${CONFIG_FILE} or ${SECRETS_FILE}.` }
   }
 
+  const sentry = channels.sentry
+  const sentryTargets =
+    isObjectRecord(sentry) && typeof sentry.organization === 'string' && Array.isArray(sentry.projects)
+      ? sentry.projects
+          .filter((project): project is string => typeof project === 'string')
+          .map((project) => `${sentry.organization}/${project}`)
+      : []
   const githubRepos = kind === 'github' ? readGithubRepos(channels.github) : []
   const hadRemoteWebhooks = githubRepos.length > 0
 
   delete channels[kind]
   config.value.channels = channels
 
-  const githubCleanup = kind === 'github' ? cleanGithubConfig(config.value, githubRepos) : undefined
+  const githubCleanup = kind === 'github' ? cleanWebhookConfig(config.value, 'github', githubRepos) : undefined
+
+  if (kind === 'sentry') cleanWebhookConfig(config.value, 'sentry', sentryTargets)
 
   const write = writeConfig(cwd, config.value, `channel: remove ${kind}`)
   if (!write.ok) return write
@@ -121,6 +134,28 @@ export function removeChannel(cwd: string, kind: ChannelKind): RemoveChannelResu
   }
 }
 
+export function setChannelWebhookUrl(
+  cwd: string,
+  channel: 'github' | 'sentry',
+  webhookUrl: string,
+): { ok: true } | { ok: false; reason: string } {
+  const url = channelsSchema.unwrap().shape[channel].unwrap().shape.webhookUrl.safeParse(webhookUrl)
+  if (!url.success) {
+    return { ok: false, reason: url.error.issues.map((issue) => issue.message).join('; ') }
+  }
+  const validated = validateConfig(cwd)
+  if (!validated.ok) return validated
+  const config = readConfigRecord(cwd)
+  if (!config.ok) return config
+  const channels = isObjectRecord(config.value.channels) ? config.value.channels : {}
+  const existing = channels[channel]
+  if (!isObjectRecord(existing)) {
+    return { ok: false, reason: `Channel "${channel}" is not configured in ${CONFIG_FILE}.` }
+  }
+  config.value.channels = { ...channels, [channel]: { ...existing, webhookUrl: url.data } }
+  return writeConfig(cwd, config.value, `채널 ${channel}의 웹훅 주소를 변경한다`)
+}
+
 // GitHub `add` writes three config artifacts beyond `channels.github`: a
 // `tunnels[]` entry marked `for: { kind: 'channel', name: 'github' }`,
 // `roles.member.match[]` rules `github:<owner>/<repo>`, and the
@@ -129,24 +164,28 @@ export function removeChannel(cwd: string, kind: ChannelKind): RemoveChannelResu
 // is a shared enablement flag a remaining tunnel may still need. Match-rule
 // stripping is scoped to the configured repos so hand-authored `github:`
 // identities survive.
-function cleanGithubConfig(config: Record<string, unknown>, repos: string[]): GithubConfigCleanup {
-  const tunnelsRemoved = removeGithubTunnels(config)
-  const { removed, kept } = removeGithubMatchRules(config, repos)
+function cleanWebhookConfig(
+  config: Record<string, unknown>,
+  channel: 'github' | 'sentry',
+  repos: string[],
+): GithubConfigCleanup {
+  const tunnelsRemoved = removeWebhookTunnels(config, channel)
+  const { removed, kept } = removeWebhookMatchRules(config, channel, repos)
   return { tunnelsRemoved, matchRulesRemoved: removed, matchRulesKept: kept }
 }
 
-function removeGithubTunnels(config: Record<string, unknown>): number {
+function removeWebhookTunnels(config: Record<string, unknown>, channel: string): number {
   if (!Array.isArray(config.tunnels)) return 0
   const before = config.tunnels.length
-  config.tunnels = config.tunnels.filter((entry) => !isGithubChannelTunnel(entry))
+  config.tunnels = config.tunnels.filter((entry) => !isWebhookChannelTunnel(entry, channel))
   return before - (config.tunnels as unknown[]).length
 }
 
-function isGithubChannelTunnel(entry: unknown): boolean {
+function isWebhookChannelTunnel(entry: unknown, channel: string): boolean {
   if (!isObjectRecord(entry)) return false
   const target = entry.for
   if (!isObjectRecord(target)) return false
-  return target.kind === 'channel' && target.name === 'github'
+  return target.kind === 'channel' && target.name === channel
 }
 
 function readGithubRepos(githubConfig: unknown): string[] {
@@ -154,8 +193,9 @@ function readGithubRepos(githubConfig: unknown): string[] {
   return githubConfig.repos.filter((repo): repo is string => typeof repo === 'string')
 }
 
-function removeGithubMatchRules(
+function removeWebhookMatchRules(
   config: Record<string, unknown>,
+  channel: string,
   repos: string[],
 ): { removed: string[]; kept: string[] } {
   const roles = isObjectRecord(config.roles) ? { ...config.roles } : undefined
@@ -164,7 +204,7 @@ function removeGithubMatchRules(
     return { removed: [], kept: [] }
   }
 
-  const toRemove = new Set(repos.map((repo) => `github:${repo}`))
+  const toRemove = new Set(repos.map((repo) => `${channel}:${repo}`))
   const removed: string[] = []
   const kept: string[] = []
   const next = member.match
@@ -174,7 +214,7 @@ function removeGithubMatchRules(
         removed.push(rule)
         return false
       }
-      if (rule.startsWith('github:')) kept.push(rule)
+      if (rule.startsWith(`${channel}:`)) kept.push(rule)
       return true
     })
 
@@ -187,6 +227,11 @@ function removeGithubMatchRules(
 }
 
 function buildDetail(kind: ChannelKind, channelConfig: unknown, secretsBlock: unknown): { detail?: string } {
+  if (kind === 'sentry') {
+    const projects =
+      isObjectRecord(channelConfig) && Array.isArray(channelConfig.projects) ? channelConfig.projects.length : 0
+    return { detail: `${projects}개 프로젝트` }
+  }
   if (kind === 'github') {
     const repos = isObjectRecord(channelConfig) && Array.isArray(channelConfig.repos) ? channelConfig.repos.length : 0
     return { detail: `${repos} repo${repos === 1 ? '' : 's'}` }

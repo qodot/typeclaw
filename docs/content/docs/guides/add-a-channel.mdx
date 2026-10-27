@@ -177,6 +177,7 @@ typeclaw channel add telegram-bot    # bot token
 typeclaw channel add webex-bot       # bot token
 typeclaw channel add webex           # email + password as your own Webex user (unofficial)
 typeclaw channel add github          # PAT or GitHub App; needs a public URL
+typeclaw channel add sentry          # 앱 토큰 또는 개인 토큰과 기존 Custom Integration
 typeclaw channel add instagram       # username + password as your own Instagram user (unofficial)
 typeclaw channel add line            # QR or email login, stored in secrets.json
 typeclaw channel add kakaotalk       # email + password, stored encrypted
@@ -230,6 +231,16 @@ There are two Webex adapters. `typeclaw channel add webex-bot` takes a **bot tok
 
 </Accordion>
 
+<Accordion title="Sentry 웹훅 연결">
+
+Sentry 조직 설정에서 전용 Internal Integration을 만들고 Issues 웹훅을 선택합니다. Integration slug, 조직 slug, 수신할 프로젝트 slug, Integration의 Client Secret을 준비한 뒤 `typeclaw channel add sentry`를 실행하세요. Client Secret은 새로 생성하지 말고 Sentry에 표시된 값을 입력합니다. 초기화 마법사에서도 같은 인증 방식을 선택할 수 있습니다.
+
+앱 토큰을 기본 추천합니다. Internal Integration에서 `event:read`, `event:write` 권한으로 토큰을 발급하고 Named Tunnel 또는 외부 고정 URL을 사용합니다. 고정 URL은 Sentry에 직접 등록하며, 개인 토큰 없이 이슈 이벤트 수신과 댓글 처리를 수행합니다. Public Integration의 OAuth 설치 흐름은 지원하지 않습니다.
+
+개인 토큰을 선택하면 조직 구성원의 `org:write`, `event:read`, `event:write` 토큰을 사용합니다. Quick Tunnel도 선택할 수 있으며, 에이전트 시작 시 공개 URL을 만들고 Sentry 설정을 자동 갱신합니다. `channel set sentry`로 인증 방식을 전환하거나 인증 정보를 교체할 수 있습니다. [전체 설정](/docs/reference/sentry)을 참고하세요.
+
+</Accordion>
+
 <Accordion title="GitHub — needs a public URL">
 
 GitHub delivers events over webhooks, so it needs a public URL to reach your container. The CLI offers to create a free Cloudflare tunnel during `channel add` — that path is covered in [Expose a port](/docs/guides/first-tunnel). For the full PR-reviewer setup, see the [Code reviewer recipe](/docs/recipes/code-reviewer).
@@ -273,7 +284,7 @@ typeclaw channel set slack-bot      # token-based adapters — swap the saved to
 typeclaw channel reauth discord     # account-login adapters — replay the interactive login
 ```
 
-`channel set` covers the token-based adapters (`slack-bot`, `discord-bot`, `telegram-bot`, `webex-bot`, `github`); `channel reauth` covers the account-login ones (`line`, `instagram`, `kakaotalk`, `webex`, `discord`, `teams`). See the [channel-adapters capability table](/docs/reference/channel-adapters#cli-verbs) for the full split. The one exception is `slack` (user), which is in neither list — rotate it by removing its `channels.slack` block from `secrets.json` and `typeclaw.json`, then running `typeclaw channel add slack` again.
+`channel set` covers the token-based adapters (`slack-bot`, `discord-bot`, `telegram-bot`, `webex-bot`, `github`, `sentry`); `channel reauth` covers the account-login ones (`line`, `instagram`, `kakaotalk`, `webex`, `discord`, `teams`). See the [channel-adapters capability table](/docs/reference/channel-adapters#cli-verbs) for the full split. The one exception is `slack` (user), which is in neither list — rotate it by removing its `channels.slack` block from `secrets.json` and `typeclaw.json`, then running `typeclaw channel add slack` again.
 
 <Accordions>
 

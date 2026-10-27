@@ -17,6 +17,7 @@ Adapters come in two shapes. **Bot adapters** authenticate as a platform bot/app
 | [`telegram-bot`](/docs/reference/telegram-bot) | bot token                                                                                      | long polling      | no          |                                                            |
 | [`instagram`](/docs/reference/instagram)       | user login (username + password)                                                               | hybrid / polling  | no          | user-account adapter; plain-text, alias-only groups        |
 | [`github`](/docs/reference/github)             | fine-grained PAT, or GitHub App (`appId` + `privateKey`; installations auto-resolved per repo) | webhook delivery  | yes         | pairs with a tunnel for inbound webhooks                   |
+| [`sentry`](/docs/reference/sentry)             | Internal Integration 토큰 또는 개인 토큰, Client Secret                                        | 웹훅              | yes         | 이슈별 세션, 앱은 고정 URL, 개인 토큰은 URL 자동 갱신      |
 | [`line`](/docs/reference/line)                 | sub-device login (QR or email + PIN)                                                           | LINE protocol     | no          | user-account adapter; plain-text outbound only             |
 | [`kakaotalk`](/docs/reference/kakaotalk)       | sub-device login (email + password, stored encrypted)                                          | LOCO protocol     | no          | survives 7-day token expiry via host-side renewal cron     |
 | [`teams`](/docs/reference/teams)               | device-code login (AAD)                                                                        | trouter WebSocket | no          | user-account adapter; ~60-90min tokens, `reauth` to rotate |
@@ -50,6 +51,7 @@ Old-epoch temporary owners are released on boot. Protected review/deferred-work 
     "webex": { "enabled": true },
     "telegram-bot": { "enabled": true },
     "instagram": { "enabled": true },
+    "sentry": { "organization": "acme", "integration": "typeclaw-agent", "projects": ["web"], "webhookPort": 8976 },
     "github": {
       "enabled": true,
       "webhookPort": 8975,
@@ -83,10 +85,10 @@ typeclaw channel reauth <adapter>   # replay the interactive login
 
 `channel add` works for **every adapter** (all twelve, including `teams` via device-code login). The other two cover disjoint sets:
 
-| Verb     | Supported adapters                                                | Notes                                                            |
-| -------- | ----------------------------------------------------------------- | ---------------------------------------------------------------- |
-| `set`    | `slack-bot`, `discord-bot`, `telegram-bot`, `webex-bot`, `github` | token-based adapters — swaps the saved token(s)                  |
-| `reauth` | `line`, `instagram`, `kakaotalk`, `webex`, `discord`, `teams`     | account-login adapters — replays the full interactive login flow |
+| Verb     | Supported adapters                                                          | Notes                                                            |
+| -------- | --------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| `set`    | `slack-bot`, `discord-bot`, `telegram-bot`, `webex-bot`, `github`, `sentry` | token-based adapters — swaps the saved token(s)                  |
+| `reauth` | `line`, `instagram`, `kakaotalk`, `webex`, `discord`, `teams`               | account-login adapters — replays the full interactive login flow |
 
 `slack` (user-account) is the one adapter in **neither** `set` nor `reauth` today. To re-authenticate, remove its `channels.slack` block from **both** `secrets.json` and `typeclaw.json`, then run `channel add slack` again — `channel add` refuses an adapter that is still configured in `typeclaw.json`. (`discord` user-account, by contrast, is reauthable: run `channel reauth discord` to replay the QR login in place.)
 
@@ -150,6 +152,7 @@ Not every adapter backs every mode. When an adapter hasn't registered a capabili
 | `webex-bot`    |    yes    |    no     |   no   |
 | `webex`        |    yes    |    no     |   no   |
 | `github`       |    yes    |    no     |   no   |
+| `sentry`       |    yes    |    no     |   no   |
 | `instagram`    |    yes    |    no     |   no   |
 | `line`         |    yes    |    no     |   no   |
 | `kakaotalk`    |    yes    |    no     |   no   |
@@ -180,7 +183,7 @@ Editing is opt-in per adapter, mirroring `ADAPTER_WRITE_CAPABILITIES` in `src/ch
 | `webex-bot`    |      yes       | `PUT /messages/{id}`      |
 | every other    |       no       | —                         |
 
-The six that don't support editing are `discord` (user), `github`, `instagram`, `line`, `kakaotalk`, and `teams` — their SDKs expose no edit primitive.
+The seven that don't support editing are `discord` (user), `github`, `sentry`, `instagram`, `line`, `kakaotalk`, and `teams` — their SDKs expose no edit primitive.
 
 ## Per-adapter quirks
 
@@ -204,3 +207,7 @@ To invite the `discord-bot` by hand, substitute your application ID into:
 ```
 https://discord.com/oauth2/authorize?client_id=YOUR_APP_ID&scope=bot+applications.commands&permissions=277025508416
 ```
+
+### Sentry 이벤트와 응답
+
+Sentry는 `issue.created`, `issue.regressed`, `issue.resolved`를 수신하고 이슈별 대화를 유지합니다. 재발은 Sentry의 `unresolved` 이벤트 중 `substatus: regressed`인 경우입니다. 기본 추천하는 앱 인증은 Internal Integration 토큰과 고정 URL을 사용하며 Sentry에 웹훅 주소를 직접 등록합니다. 개인 토큰 인증은 터널 주소가 바뀔 때 기존 Custom Integration의 웹훅 URL을 자동 갱신합니다. `channel set sentry`로 인증 방식을 전환하거나 인증 정보를 교체하며, `channel reauth`는 사용하지 않습니다. 채널 제거는 원격 Custom Integration을 삭제하지 않습니다. 자세한 권한과 설정은 [Sentry](/docs/reference/sentry)를 참고하세요.

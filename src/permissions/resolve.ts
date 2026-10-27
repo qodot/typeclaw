@@ -10,6 +10,7 @@ const ADAPTER_TO_PLATFORM: Record<AdapterId, Platform> = {
   discord: 'discord',
   'discord-bot': 'discord',
   github: 'github',
+  sentry: 'sentry',
   instagram: 'instagram',
   'telegram-bot': 'telegram',
   webex: 'webex',

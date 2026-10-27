@@ -448,6 +448,7 @@ async function startAgentRuntime(
     stream,
     resolveChannelUpstreamPort: (name) => {
       if (name === 'github') return getConfig().channels.github?.webhookPort ?? null
+      if (name === 'sentry') return getConfig().channels.sentry?.webhookPort ?? null
       return null
     },
   })

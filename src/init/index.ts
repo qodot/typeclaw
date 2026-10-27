@@ -2,6 +2,7 @@ import { existsSync, readdirSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 
+import { channelsSchema } from '@/channels/schema'
 import {
   config,
   configSchema,
@@ -127,7 +128,23 @@ export type GithubInitCredentials = {
   auth: { type: 'pat'; pat: string } | { type: 'app'; appId: number; privateKey: string }
 }
 
-export type GithubTunnelProvider = 'cloudflare-quick' | 'cloudflare-named' | 'external' | 'none'
+export type SentryInitCredentials = {
+  organization: string
+  integration: string
+  projects: string[]
+  apiUrl?: string
+  auth: { type: 'app' | 'pat'; token: string }
+  webhookSecret: string
+  tunnelProvider: WebhookTunnelProvider
+  webhookUrl?: string
+  webhookPort?: number
+  hostname?: string
+  tokenEnv?: string
+}
+
+export type WebhookTunnelProvider = 'cloudflare-quick' | 'cloudflare-named' | 'external' | 'none'
+
+export type GithubTunnelProvider = WebhookTunnelProvider
 
 export type InitStepEvent =
   | { step: 'preflight'; phase: 'start' }
@@ -237,6 +254,8 @@ export type InitOptions = {
   withTeams?: boolean
   withInstagram?: boolean
   withKakaotalk?: boolean
+  withSentry?: boolean
+  sentryCredentials?: SentryInitCredentials
   withGithub?: boolean
   runKakaotalkAuth?: KakaotalkAuthRunner
   runWebexAuth?: WebexAuthRunner
@@ -291,6 +310,8 @@ export async function runInit({
   withTeams = false,
   withInstagram = false,
   withKakaotalk = false,
+  withSentry = false,
+  sentryCredentials,
   withGithub = false,
   runKakaotalkAuth,
   runWebexAuth,
@@ -307,6 +328,10 @@ export async function runInit({
   platform = process.platform,
   runBunLink,
 }: InitOptions): Promise<void> {
+  if (withSentry && sentryCredentials === undefined)
+    throw new Error('Sentry 초기화에는 sentryCredentials가 필요합니다.')
+  if (withSentry && sentryCredentials !== undefined)
+    channelsSchema.parse({ sentry: buildSentryChannelConfig(sentryCredentials) })
   const emit = onProgress ?? (() => {})
 
   // Docker preflight runs BEFORE any scaffolding so a missing-binary or
@@ -459,6 +484,10 @@ export async function runInit({
   // overwrites typeclaw.json wholesale on every run), so failing on an
   // existing secret block here would brick the re-init recovery path the
   // bot-token adapters all support.
+  if (withSentry && sentryCredentials !== undefined) {
+    await writeSentryChannelForInit(cwd, sentryCredentials)
+  }
+
   if (withGithub && githubCredentials !== undefined) {
     await writeGithubChannelForInit(cwd, githubCredentials)
     if (githubCredentials.webhookUrl !== undefined && githubCredentials.repos.length > 0) {
@@ -506,6 +535,7 @@ export async function runInit({
   if (withInstagram) configuredChannels.push('instagram')
   if (withKakaotalk) configuredChannels.push('kakaotalk')
   if (withGithub) configuredChannels.push('github')
+  if (withSentry) configuredChannels.push('sentry')
 
   emit({ step: 'hatching', phase: 'start' })
   const hatching = await runHatching({
@@ -1042,7 +1072,17 @@ export async function hasExistingOAuthCredentials(root: string, providerId: Know
 // kakaotalk` anyway — better to re-auth now during init.
 export async function hasExistingChannelSecrets(
   root: string,
-  channel: 'discord' | 'slack' | 'telegram' | 'webex' | 'teams' | 'instagram' | 'line' | 'kakaotalk' | 'github',
+  channel:
+    | 'discord'
+    | 'slack'
+    | 'telegram'
+    | 'webex'
+    | 'teams'
+    | 'instagram'
+    | 'line'
+    | 'kakaotalk'
+    | 'github'
+    | 'sentry',
 ): Promise<boolean> {
   const channels = new SecretsBackend(join(root, 'secrets.json')).tryReadChannelsSync()
   if (channels === null) return false
@@ -1057,6 +1097,8 @@ export async function hasExistingChannelSecrets(
       return hasCurrentWebexAccount(channels.webex)
     case 'teams':
       return hasCurrentTeamsAccount(channels.teams)
+    case 'sentry':
+      return false
     case 'github':
       // GitHub credentials alone are not enough to scaffold a working
       // channel: typeclaw.json#channels.github also needs webhookUrl and
@@ -1217,6 +1259,7 @@ export type ChannelKind =
   | 'line'
   | 'kakaotalk'
   | 'github'
+  | 'sentry'
 
 // Public adapter names match the typeclaw.json `channels.*` keys exactly.
 // The CLI takes these as the optional positional arg, the picker shows
@@ -1235,6 +1278,7 @@ export const CHANNEL_KINDS: ReadonlyArray<ChannelKind> = [
   'line',
   'kakaotalk',
   'github',
+  'sentry',
 ]
 
 export type AddChannelStep =
@@ -1277,6 +1321,7 @@ export type AddChannelOptions = {
   cwd: string
   onProgress?: (event: AddChannelStepEvent) => void
 } & (
+  | ({ channel: 'sentry' } & SentryInitCredentials)
   | { channel: 'discord-bot'; discordBotToken: string }
   | { channel: 'discord'; runDiscordAuth: DiscordAuthRunner }
   | { channel: 'slack'; slackQrDataUrl: string; runSlackAuth?: SlackAuthRunner }
@@ -1288,24 +1333,14 @@ export type AddChannelOptions = {
   | { channel: 'instagram'; runInstagramAuth: InstagramAuthRunner }
   | { channel: 'line'; runLineAuth: LineAuthRunner }
   | { channel: 'kakaotalk'; runKakaotalkAuth: KakaotalkAuthRunner }
-  | {
-      channel: 'github'
-      webhookSecret: string
-      tunnelProvider: GithubTunnelProvider
-      webhookUrl?: string
-      webhookPort?: number
-      hostname?: string
-      tokenEnv?: string
-      repos: string[]
-      auth: { type: 'pat'; pat: string } | { type: 'app'; appId: number; privateKey: string }
-      fetchImpl?: typeof fetch
-    }
+  | ({ channel: 'github'; fetchImpl?: typeof fetch } & GithubInitCredentials)
 )
 
 export type SlackAuthRunner = (options: { cwd: string; qrDataUrl: string }) => Promise<SlackAuthResult>
 export type DiscordAuthRunner = (options: { cwd: string }) => Promise<DiscordAuthResult>
 
 export async function runAddChannel(options: AddChannelOptions): Promise<void> {
+  if (options.channel === 'sentry') channelsSchema.parse({ sentry: buildSentryChannelConfig(options) })
   const emit = options.onProgress ?? (() => {})
 
   // Order: kakaotalk-auth (if applicable) -> config -> secrets.
@@ -1378,10 +1413,21 @@ export async function runAddChannel(options: AddChannelOptions): Promise<void> {
   if (options.channel === 'github') {
     await appendGithubSecrets(options.cwd, options)
   }
+  if (options.channel === 'sentry') {
+    await appendSentrySecrets(options.cwd, options)
+  }
   emit({ step: 'secrets', phase: 'done' })
 
+  if (options.channel === 'sentry') {
+    await appendWebhookMatchRules(
+      options.cwd,
+      'sentry',
+      options.projects.map((project) => `${options.organization}/${project}`),
+    )
+  }
+
   if (options.channel === 'github') {
-    await appendGithubMatchRules(options.cwd, options.repos)
+    await appendWebhookMatchRules(options.cwd, 'github', options.repos)
     await maybeInstallGithubWebhooks(options, emit)
   }
 
@@ -1460,6 +1506,8 @@ function channelSecretsFromOptions(options: AddChannelOptions): ChannelSecrets {
       // KakaoTalk auth writes its structured multi-account block directly to
       // secrets.json#channels.kakaotalk before config mutation.
       return {}
+    case 'sentry':
+      return {}
     case 'github':
       // GitHub stores a structured PAT + webhook secret block directly.
       return {}
@@ -1535,16 +1583,55 @@ async function mergeChannelIntoConfig(cwd: string, options: AddChannelOptions): 
     throw new Error(`Channel "${options.channel}" is already configured in ${CONFIG_FILE}.`)
   }
 
-  const nextChannelConfig = options.channel === 'github' ? buildGithubChannelConfig(options) : {}
+  const nextChannelConfig =
+    options.channel === 'github'
+      ? buildGithubChannelConfig(options)
+      : options.channel === 'sentry'
+        ? buildSentryChannelConfig(options)
+        : {}
 
   parsed.channels = {
     ...existingChannels,
     [options.channel]: nextChannelConfig,
   }
 
-  if (options.channel === 'github') mergeGithubTunnelConfig(parsed, options)
+  if (options.channel === 'github' || options.channel === 'sentry') mergeWebhookTunnelConfig(parsed, options)
 
   await writeFile(path, `${JSON.stringify(parsed, null, 2)}\n`)
+}
+
+function buildSentryChannelConfig(options: SentryInitCredentials): Record<string, unknown> {
+  return {
+    organization: options.organization,
+    integration: options.integration,
+    projects: options.projects,
+    ...(options.apiUrl !== undefined ? { apiUrl: options.apiUrl } : {}),
+    ...(options.webhookUrl !== undefined ? { webhookUrl: options.webhookUrl } : {}),
+    webhookPort: options.webhookPort ?? 8976,
+  }
+}
+
+async function writeSentryChannelForInit(cwd: string, credentials: SentryInitCredentials): Promise<void> {
+  const configPath = join(cwd, CONFIG_FILE)
+  const parsed = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>
+  const channels = isObjectRecord(parsed.channels) ? parsed.channels : {}
+  parsed.channels = { ...channels, sentry: buildSentryChannelConfig(credentials) }
+  mergeWebhookTunnelConfig(parsed, { cwd, channel: 'sentry', ...credentials })
+  await writeFile(configPath, `${JSON.stringify(parsed, null, 2)}\n`)
+  const backend = new SecretsBackend(join(cwd, 'secrets.json'))
+  const secrets = backend.readChannelsSync()
+  backend.writeChannelsSync({
+    ...secrets,
+    sentry: {
+      auth: { type: credentials.auth.type, token: { value: credentials.auth.token } },
+      webhookSecret: { value: credentials.webhookSecret },
+    },
+  })
+  await appendWebhookMatchRules(
+    cwd,
+    'sentry',
+    credentials.projects.map((project) => `${credentials.organization}/${project}`),
+  )
 }
 
 function buildGithubChannelConfig(options: Extract<AddChannelOptions, { channel: 'github' }>): Record<string, unknown> {
@@ -1558,25 +1645,25 @@ function buildGithubChannelConfig(options: Extract<AddChannelOptions, { channel:
   }
 }
 
-function mergeGithubTunnelConfig(
+function mergeWebhookTunnelConfig(
   parsed: Record<string, unknown>,
-  options: Extract<AddChannelOptions, { channel: 'github' }>,
+  options: Extract<AddChannelOptions, { channel: 'github' | 'sentry' }>,
 ): void {
   if (options.tunnelProvider === 'none') return
   if (options.tunnelProvider === 'external' && options.webhookUrl === undefined) {
-    throw new Error('GitHub external tunnel requires webhookUrl')
+    throw new Error(`${options.channel} external 터널에는 webhookUrl이 필요합니다.`)
   }
   if (options.tunnelProvider === 'cloudflare-named') {
     if (options.hostname === undefined || options.hostname.trim() === '') {
-      throw new Error('GitHub cloudflare-named tunnel requires hostname')
+      throw new Error(`${options.channel} cloudflare-named 터널에는 hostname이 필요합니다.`)
     }
     if (options.tokenEnv === undefined || options.tokenEnv.trim() === '') {
-      throw new Error('GitHub cloudflare-named tunnel requires tokenEnv')
+      throw new Error(`${options.channel} cloudflare-named 터널에는 tokenEnv가 필요합니다.`)
     }
   }
 
   const existingTunnels = Array.isArray(parsed.tunnels) ? parsed.tunnels : []
-  const tunnel = buildGithubTunnelEntry(options)
+  const tunnel = buildWebhookTunnelEntry(options)
   parsed.tunnels = [...existingTunnels, tunnel]
 
   if (options.tunnelProvider === 'cloudflare-quick' || options.tunnelProvider === 'cloudflare-named') {
@@ -1588,31 +1675,33 @@ function mergeGithubTunnelConfig(
   }
 }
 
-function buildGithubTunnelEntry(options: Extract<AddChannelOptions, { channel: 'github' }>): Record<string, unknown> {
+function buildWebhookTunnelEntry(
+  options: Extract<AddChannelOptions, { channel: 'github' | 'sentry' }>,
+): Record<string, unknown> {
   switch (options.tunnelProvider) {
     case 'external':
       return {
-        name: 'github-webhook',
+        name: `${options.channel}-webhook`,
         provider: 'external',
         externalUrl: options.webhookUrl,
-        for: { kind: 'channel', name: 'github' },
+        for: { kind: 'channel', name: options.channel },
       }
     case 'cloudflare-quick':
       return {
-        name: 'github-webhook',
+        name: `${options.channel}-webhook`,
         provider: 'cloudflare-quick',
-        for: { kind: 'channel', name: 'github' },
+        for: { kind: 'channel', name: options.channel },
       }
     case 'cloudflare-named':
       return {
-        name: 'github-webhook',
+        name: `${options.channel}-webhook`,
         provider: 'cloudflare-named',
-        for: { kind: 'channel', name: 'github' },
+        for: { kind: 'channel', name: options.channel },
         hostname: options.hostname,
         tokenEnv: options.tokenEnv,
       }
     case 'none':
-      throw new Error('buildGithubTunnelEntry called with tunnelProvider=none')
+      throw new Error('buildWebhookTunnelEntry called with tunnelProvider=none')
   }
 }
 
@@ -1632,7 +1721,7 @@ async function writeGithubChannelForInit(cwd: string, credentials: GithubInitCre
     repos: credentials.repos,
   }
   parsed.channels = existingChannels
-  mergeGithubTunnelConfig(parsed, { channel: 'github', ...credentials, cwd })
+  mergeWebhookTunnelConfig(parsed, { channel: 'github', ...credentials, cwd })
   await writeFile(configPath, `${JSON.stringify(parsed, null, 2)}\n`)
 
   const backend = new SecretsBackend(join(cwd, 'secrets.json'))
@@ -1650,7 +1739,7 @@ async function writeGithubChannelForInit(cwd: string, credentials: GithubInitCre
   }
   backend.writeChannelsSync(channels as Channels)
 
-  await appendGithubMatchRules(cwd, credentials.repos)
+  await appendWebhookMatchRules(cwd, 'github', credentials.repos)
 }
 
 async function appendGithubSecrets(
@@ -1683,14 +1772,41 @@ async function appendGithubSecrets(
   backend.writeChannelsSync(channels as Channels)
 }
 
-async function appendGithubMatchRules(cwd: string, repos: readonly string[]): Promise<void> {
+async function appendSentrySecrets(
+  cwd: string,
+  options: Extract<AddChannelOptions, { channel: 'sentry' }>,
+): Promise<void> {
+  if (!existsSync(join(cwd, CONFIG_FILE))) {
+    throw new Error(
+      `${CONFIG_FILE} not found at ${cwd}. Run \`typeclaw init\` before adding channels, or run this command from inside an agent folder.`,
+    )
+  }
+  const backend = new SecretsBackend(join(cwd, 'secrets.json'))
+  const channels: Record<string, unknown> = backend.readChannelsSync()
+  if (channels.sentry !== undefined) {
+    throw new Error(
+      'sentry is already set in secrets.json. Remove it before re-adding the channel, or edit it by hand.',
+    )
+  }
+  channels.sentry = {
+    auth: { type: options.auth.type, token: { value: options.auth.token } satisfies Secret },
+    webhookSecret: { value: options.webhookSecret } satisfies Secret,
+  }
+  backend.writeChannelsSync(channels as Channels)
+}
+
+async function appendWebhookMatchRules(
+  cwd: string,
+  channel: 'github' | 'sentry',
+  targets: readonly string[],
+): Promise<void> {
   const path = join(cwd, CONFIG_FILE)
   const parsed = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>
   const roles = isObjectRecord(parsed.roles) ? { ...parsed.roles } : {}
   const member = isObjectRecord(roles.member) ? { ...roles.member } : {}
   const existing = Array.isArray(member.match) ? member.match.filter((v): v is string => typeof v === 'string') : []
   const merged = new Set(existing)
-  for (const repo of repos) merged.add(`github:${repo}`)
+  for (const target of targets) merged.add(`${channel}:${target}`)
   member.match = Array.from(merged)
   roles.member = member
   parsed.roles = roles
@@ -1873,7 +1989,7 @@ export async function setGithubSecrets(cwd: string, patch: GithubCredentialPatch
 
     if (patch.auth !== undefined) {
       const existingAuth = block.auth
-      const existingAuthType = readGithubAuthTypeFromObject(existingAuth)
+      const existingAuthType = readChannelAuthTypeFromObject(existingAuth)
       const isSameType = existingAuthType === patch.auth.type
       if (patch.auth.type === 'pat') {
         const previousToken =
@@ -1909,6 +2025,46 @@ export async function setGithubSecrets(cwd: string, patch: GithubCredentialPatch
   })
 }
 
+export type SentryCredentialPatch = {
+  auth?: SentryInitCredentials['auth']
+  webhookSecret?: string
+}
+
+export async function setSentrySecrets(cwd: string, patch: SentryCredentialPatch): Promise<SetChannelTokensResult> {
+  if (!existsSync(join(cwd, CONFIG_FILE))) {
+    return {
+      ok: false,
+      reason: `${CONFIG_FILE} not found at ${cwd}. Run \`typeclaw init\` before rotating channel credentials, or run this command from inside an agent folder.`,
+    }
+  }
+
+  if (patch.webhookSecret === undefined && patch.auth === undefined) return { ok: true }
+
+  return await runChannelMutation(cwd, async (current) => {
+    const existing = current.sentry
+    if (!isObjectRecord(existing)) {
+      return {
+        result: {
+          ok: false,
+          reason: 'sentry is not configured in secrets.json. Run `typeclaw channel add sentry` first.',
+        },
+      }
+    }
+    const block: Record<string, unknown> = { ...existing }
+    if (patch.auth !== undefined) {
+      const existingAuth = block.auth
+      const isSameType = readChannelAuthTypeFromObject(existingAuth) === patch.auth.type
+      const previousToken = isSameType && isObjectRecord(existingAuth) ? existingAuth.token : undefined
+      block.auth = { type: patch.auth.type, token: rotatedSecret(previousToken, patch.auth.token) }
+    }
+    if (patch.webhookSecret !== undefined) {
+      block.webhookSecret = rotatedSecret(block.webhookSecret, patch.webhookSecret)
+    }
+    const next: Record<string, unknown> = { ...current, sentry: block }
+    return { result: { ok: true }, next }
+  })
+}
+
 // Wrapper that converts a thrown schema-validation error (from a hand-edited
 // malformed secrets.json) into a structured `{ ok: false }` result, so CLI
 // callers can render a clean message instead of a stack trace. The
@@ -1940,7 +2096,7 @@ function isSecretFieldSet(slot: unknown): boolean {
   return false
 }
 
-function readGithubAuthTypeFromObject(auth: unknown): 'pat' | 'app' | undefined {
+function readChannelAuthTypeFromObject(auth: unknown): 'pat' | 'app' | undefined {
   if (!isObjectRecord(auth)) return undefined
   const type = (auth as { type?: unknown }).type
   if (type === 'pat' || type === 'app') return type
@@ -1965,5 +2121,18 @@ export function readGithubAuthType(cwd: string): 'pat' | 'app' | null {
   const github = channels.github
   if (!isObjectRecord(github)) return null
   const auth = (github as { auth?: unknown }).auth
-  return readGithubAuthTypeFromObject(auth) ?? null
+  return readChannelAuthTypeFromObject(auth) ?? null
+}
+
+export function readSentryAuthType(cwd: string): 'pat' | 'app' | null {
+  let channels: Channels | null
+  try {
+    channels = new SecretsBackend(join(cwd, 'secrets.json')).tryReadChannelsSync()
+  } catch {
+    return null
+  }
+  if (channels === null) return null
+  const sentry = channels.sentry
+  if (!isObjectRecord(sentry)) return null
+  return readChannelAuthTypeFromObject(sentry.auth) ?? null
 }

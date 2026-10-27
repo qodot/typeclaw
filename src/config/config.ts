@@ -1146,7 +1146,30 @@ export type ConfigReloadDiff = {
 // failure result.
 export function reloadConfig(cwd: string): ConfigReloadDiff {
   const next = loadConfigSync(cwd)
+  const sentryConnectionChanges: ConfigChange[] = []
+  const previousSentry = current.channels.sentry
+  const nextSentry = next.channels.sentry
+  if (previousSentry?.enabled && nextSentry?.enabled) {
+    for (const field of ['apiUrl', 'organization', 'integration', 'webhookPort', 'webhookUrl'] as const) {
+      if (previousSentry[field] !== nextSentry[field]) {
+        sentryConnectionChanges.push({
+          path: `channels.sentry.${field}`,
+          before: previousSentry[field],
+          after: nextSentry[field],
+        })
+      }
+    }
+    next.channels.sentry = {
+      ...nextSentry,
+      apiUrl: previousSentry.apiUrl,
+      organization: previousSentry.organization,
+      integration: previousSentry.integration,
+      webhookPort: previousSentry.webhookPort,
+      webhookUrl: previousSentry.webhookUrl,
+    }
+  }
   const diff = diffConfig(current, next)
+  diff.restartRequired.push(...sentryConnectionChanges)
   current = next
   return diff
 }

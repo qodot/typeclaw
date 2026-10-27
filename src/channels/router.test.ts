@@ -12491,6 +12491,47 @@ describe('ChannelRouter channel name resolver', () => {
 })
 
 describe('ChannelRouter peer-bot loop guard', () => {
+  test('Sentry 이슈의 생성과 반복 재발 및 해결은 봇 대화 루프로 경고하지 않는다', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    const key: ChannelKey = { adapter: 'sentry', workspace: 'acme/backend', chat: 'issue:42', thread: null }
+    const events = [
+      'issue.created',
+      'issue.resolved',
+      'issue.regressed',
+      'issue.resolved',
+      'issue.regressed',
+      'issue.resolved',
+    ]
+    for (const [index, eventKind] of events.entries()) {
+      const receipt = await router.route(
+        botInbound({
+          ...key,
+          eventKind,
+          authorId: 'sentry',
+          externalMessageId: `sentry-${index}`,
+          text: `오류 상태: ${eventKind}`,
+        }),
+      )
+      expect(receipt.kind).toBe('accepted')
+      await router.__testing!.flushDebounce(key)
+    }
+    expect(sessions[0]!.prompts).toHaveLength(events.length)
+    expect(sessions[0]!.prompts.at(-1)).toContain('issue.resolved')
+    expect(sessions[0]!.prompts.every((prompt) => !prompt.includes('Peer bots have engaged you'))).toBe(true)
+  })
+
+  test('Sentry의 이슈 수명주기가 아닌 봇 이벤트는 기존 루프 경고를 유지한다', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    const key: ChannelKey = { adapter: 'sentry', workspace: 'acme/backend', chat: 'issue:42', thread: null }
+    for (let index = 0; index < 5; index++) {
+      await router.route(botInbound({ ...key, eventKind: 'comment.created', externalMessageId: `comment-${index}` }))
+      await router.__testing!.flushDebounce(key)
+    }
+    expect(sessions[0]!.prompts.at(-1)).toContain('Peer bots have engaged you')
+  })
+
   function botInbound(over: Partial<InboundMessage> = {}): InboundMessage {
     return inbound({
       authorIsBot: true,

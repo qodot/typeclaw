@@ -26,6 +26,7 @@ export const PLATFORMS = [
   'line',
   'kakao',
   'github',
+  'sentry',
 ] as const
 export type Platform = (typeof PLATFORMS)[number]
 
@@ -154,6 +155,7 @@ function parseChannelScope(platform: Platform, rest: string, author: string | un
   }
 
   if (platform === 'github') return parseGithubChannelScope(rest, author)
+  if (platform === 'sentry') return parseSentryChannelScope(rest, author)
 
   // Bucket scopes: `dm/*`, `dm/<id>`, `group/*`, `open/*`. Slack's `im` is
   // renamed to `dm`; that mapping is enforced by the legacy-prefix table at
@@ -253,6 +255,20 @@ function parseGithubChannelScope(rest: string, author: string | undefined): Pars
     return { ok: false, error: "github chat scope must be a single segment like 'issue:42'" }
   }
   return { ok: true, value: buildChannelRule('github', { workspace, chat, author }) }
+}
+
+function parseSentryChannelScope(rest: string, author: string | undefined): ParseMatchRuleResult {
+  const [organization, project, ...chatParts] = rest.split('/')
+  if (!organization || !project || organization === '*' || project === '*') {
+    return { ok: false, error: "sentry scope requires 'organization/project' or '*'" }
+  }
+  const workspace = `${organization}/${project}`
+  if (chatParts.length === 0) return { ok: true, value: buildChannelRule('sentry', { workspace, author }) }
+  const [chat] = chatParts
+  if (chatParts.length !== 1 || chat === undefined || !/^issue:\d+$/.test(chat)) {
+    return { ok: false, error: "sentry chat scope requires 'issue:<id>'" }
+  }
+  return { ok: true, value: buildChannelRule('sentry', { workspace, chat, author }) }
 }
 
 function buildChannelRule(

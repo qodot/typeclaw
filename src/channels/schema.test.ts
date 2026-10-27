@@ -17,6 +17,7 @@ const adapterSourcePath: Record<(typeof ADAPTER_IDS)[number], string> = {
   discord: 'discord.ts',
   'discord-bot': 'discord-bot.ts',
   github: 'github/index.ts',
+  sentry: 'sentry/index.ts',
   instagram: 'instagram.ts',
   line: 'line.ts',
   kakaotalk: 'kakaotalk.ts',
@@ -29,6 +30,59 @@ const adapterSourcePath: Record<(typeof ADAPTER_IDS)[number], string> = {
 }
 
 describe('channelsSchema', () => {
+  test('Sentry slug는 권한 경로 구분자와 잘못된 조직 및 프로젝트 이름을 거부한다', () => {
+    for (const organization of ['acme/team', 'acme team', '123', 'acme_organization']) {
+      expect(
+        channelsSchema.safeParse({ sentry: { organization, integration: 'typeclaw', projects: ['web'] } }).success,
+      ).toBe(false)
+    }
+    for (const project of ['web/other', 'web project', '*', '123']) {
+      expect(
+        channelsSchema.safeParse({ sentry: { organization: 'acme', integration: 'typeclaw', projects: [project] } })
+          .success,
+      ).toBe(false)
+    }
+    expect(
+      channelsSchema.safeParse({
+        sentry: { organization: 'acme-team', integration: 'typeclaw-agent', projects: ['web_frontend'] },
+      }).success,
+    ).toBe(true)
+  })
+
+  test('Sentry는 명시한 조직과 연동에 이슈 이벤트 기본값을 적용한다', () => {
+    const config = channelsSchema.parse({ sentry: { organization: 'acme', integration: 'typeclaw' } }).sentry
+    expect(config).toMatchObject({
+      organization: 'acme',
+      integration: 'typeclaw',
+      projects: [],
+      webhookPort: 8976,
+      apiUrl: 'https://sentry.io',
+      eventAllowlist: ['issue.created', 'issue.regressed', 'issue.resolved'],
+      enabled: true,
+    })
+    expect(config?.webhookUrl).toBeUndefined()
+  })
+
+  test('Sentry는 프로젝트와 웹훅 주소를 보존하고 필수 설정 누락을 거부한다', () => {
+    expect(
+      channelsSchema.parse({
+        sentry: {
+          organization: 'acme',
+          integration: 'typeclaw',
+          projects: ['backend'],
+          webhookUrl: 'https://agent.example.com/sentry',
+          eventAllowlist: ['issue.created'],
+        },
+      }).sentry,
+    ).toMatchObject({
+      projects: ['backend'],
+      webhookUrl: 'https://agent.example.com/sentry',
+      eventAllowlist: ['issue.created'],
+    })
+    expect(channelsSchema.safeParse({ sentry: { organization: 'acme' } }).success).toBe(false)
+    expect(channelsSchema.safeParse({ sentry: { organization: '', integration: 'typeclaw' } }).success).toBe(false)
+  })
+
   test('parses an empty channels record', () => {
     const parsed = channelsSchema.parse({})
     expect(parsed['discord-bot']).toBeUndefined()

@@ -79,6 +79,14 @@ const githubChannelSchema = z.object({
   webhookSecret: secretFieldSchema,
 })
 
+const sentryChannelSchema = z.object({
+  auth: z.object({
+    type: z.enum(['pat', 'app']),
+    token: secretFieldSchema,
+  }),
+  webhookSecret: secretFieldSchema,
+})
+
 const lineDeviceSchema = z.enum(['DESKTOPWIN', 'DESKTOPMAC', 'ANDROID', 'ANDROIDSECONDARY', 'IOS', 'IOSIPAD'])
 
 // LINE persists a long-lived auth token (+ optional certificate that lets a
@@ -246,6 +254,7 @@ export const channelsSchema = z
     discord: discordChannelBlockSchema.optional(),
     'discord-bot': discordBotChannelSchema.optional(),
     github: githubChannelSchema.optional(),
+    sentry: sentryChannelSchema.optional(),
     'telegram-bot': telegramBotChannelSchema.optional(),
     line: lineChannelBlockSchema.optional(),
     instagram: instagramChannelBlockSchema.optional(),
@@ -280,6 +289,7 @@ export type Channels = z.infer<typeof channelsSchema>
 export type GithubPatAuthBlock = z.infer<typeof githubPatAuthSchema>
 export type GithubAppAuthBlock = z.infer<typeof githubAppAuthSchema>
 export type GithubSecretsBlock = z.infer<typeof githubChannelSchema>
+export type SentrySecretsBlock = z.infer<typeof sentryChannelSchema>
 export type DiscordAccountRecord = z.infer<typeof discordAccountRecordSchema>
 export type DiscordChannelBlock = z.infer<typeof discordChannelBlockSchema>
 export type LineAccountRecord = z.infer<typeof lineAccountRecordSchema>

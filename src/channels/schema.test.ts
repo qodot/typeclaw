@@ -28,6 +28,43 @@ const adapterSourcePath: Record<(typeof ADAPTER_IDS)[number], string> = {
   'webex-bot': 'webex-bot.ts',
 }
 
+describe('channelsSchema watchChannels', () => {
+  test('preserves engagement defaults when watchChannels is omitted', () => {
+    const config = channelsSchema.parse({ 'slack-bot': {} })['slack-bot']!
+    expect(config.engagement.watchChannels).toBeUndefined()
+    expect(config.engagement.trigger).toEqual(['mention', 'reply', 'dm'])
+  })
+
+  test('preserves workspace and chat IDs independently for each adapter', () => {
+    const config = channelsSchema.parse({
+      'slack-bot': { engagement: { watchChannels: [{ workspace: 'T1', chat: 'C1' }] } },
+      slack: { engagement: { watchChannels: [{ workspace: 'T2', chat: 'C2' }] } },
+    })
+    expect(config['slack-bot']!.engagement.watchChannels).toEqual([{ workspace: 'T1', chat: 'C1' }])
+    expect(config.slack!.engagement.watchChannels).toEqual([{ workspace: 'T2', chat: 'C2' }])
+  })
+
+  test('accepts an empty list to disable channel watching', () => {
+    expect(
+      channelsSchema.parse({ 'slack-bot': { engagement: { watchChannels: [] } } })['slack-bot']!.engagement
+        .watchChannels,
+    ).toEqual([])
+  })
+
+  test('rejects missing or empty workspace and chat IDs', () => {
+    for (const channel of [
+      { chat: 'C1' },
+      { workspace: 'T1' },
+      { workspace: '', chat: 'C1' },
+      { workspace: 'T1', chat: '' },
+    ]) {
+      expect(channelsSchema.safeParse({ 'slack-bot': { engagement: { watchChannels: [channel] } } }).success).toBe(
+        false,
+      )
+    }
+  })
+})
+
 describe('channelsSchema', () => {
   test('parses an empty channels record', () => {
     const parsed = channelsSchema.parse({})

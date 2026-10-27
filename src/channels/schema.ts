@@ -86,6 +86,7 @@ export const STICKY_DEFAULT_WINDOW_MS = 15 * 60 * 1000
 const engagementSchema = z
   .object({
     trigger: z.array(engagementTriggerSchema).default(['mention', 'reply', 'dm']),
+    watchChannels: z.array(z.object({ workspace: z.string().min(1), chat: z.string().min(1) })).optional(),
     stickiness: stickinessSchema.default({ perReply: { window: STICKY_DEFAULT_WINDOW_MS } }),
   })
   .default({
